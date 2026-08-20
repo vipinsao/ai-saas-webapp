@@ -1,160 +1,183 @@
 "use client";
-import React, { useEffect, useState, useRef } from "react";
-import { CldImage } from "next-cloudinary";
 
-const SocialFormats = {
-  "Instagram Square (1:1)": { width: 1080, height: 1080, aspectRatio: "1:1" },
-  "Instagram Portrait (4:5)": { width: 1080, height: 1350, aspectRatio: "4:5" },
-  "Twitter Post (16:9)": { width: 1200, height: 675, aspectRatio: "16:9" },
-  "Twitter Header (3:1)": { width: 1500, height: 500, aspectRatio: "3:1" },
-  "Facebook Cover (205:78)": { width: 820, height: 312, aspectRatio: "205:78" },
-};
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  SOCIAL_FORMATS,
+  SOCIAL_FORMAT_IDS,
+  type SocialFormatId,
+} from "@/lib/socialFormats";
+import { MAX_IMAGE_BYTES, formatBytes, IMAGE_MIME_TYPES } from "@/lib/uploadValidation";
 
-//this is because we are using typescript
-type SocialFormat = keyof typeof SocialFormats;
+interface UploadedImage {
+  id: string;
+  width: number;
+  height: number;
+  bytes: number;
+  originalBytes: number;
+}
 
 export default function SocialShare() {
-  const [uploadedImage, setUploadedImage] = useState<string | null>(null);
-  const [selectedFormat, setSelectedFormat] = useState<SocialFormat>(
-    "Instagram Square (1:1)"
-  );
-  const [isUploading, setIsUpoloading] = useState(false);
+  const [uploaded, setUploaded] = useState<UploadedImage | null>(null);
+  const [selectedFormat, setSelectedFormat] =
+    useState<SocialFormatId>("instagram-square");
+  const [isUploading, setIsUploading] = useState(false);
   const [isTransforming, setIsTransforming] = useState(false);
-  const imageRef = useRef<HTMLImageElement>(null);
+  const [error, setError] = useState<string | null>(null);
 
+  const previewUrl = useMemo(
+    () => (uploaded ? `/api/images/${uploaded.id}?format=${selectedFormat}` : null),
+    [uploaded, selectedFormat]
+  );
+
+  // Each format change requests a fresh crop from the server, so show the
+  // spinner until that specific response has painted.
   useEffect(() => {
-    if (uploadedImage) {
-      setIsTransforming(true);
-    }
-  }, [selectedFormat, uploadedImage]);
+    if (previewUrl) setIsTransforming(true);
+  }, [previewUrl]);
 
-  const handleFileUpload = async (
-    event: React.ChangeEvent<HTMLInputElement>
-  ) => {
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    setIsUpoloading(true);
+
+    setError(null);
+    setIsUploading(true);
     const formData = new FormData();
-    formData.append("file", file); //key value pair
+    formData.append("file", file);
 
     try {
       const response = await fetch("/api/image-upload", {
         method: "POST",
         body: formData,
       });
+
       if (!response.ok) {
-        throw new Error("Failed to upload image");
+        // Every failure path on the route returns { error }, so surface the
+        // specific reason instead of a generic "upload failed".
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.error ?? `Upload failed (${response.status})`);
       }
-      const data = await response.json();
-      setUploadedImage(data.publicId);
-    } catch (error) {
-      console.log(error);
-      alert("Failed to upload image");
+
+      setUploaded((await response.json()) as UploadedImage);
+    } catch (cause) {
+      console.error(cause);
+      setUploaded(null);
+      setError(cause instanceof Error ? cause.message : "Upload failed");
     } finally {
-      setIsUpoloading(false);
+      setIsUploading(false);
     }
   };
 
-  const handleDownload = () => {
-    if (!imageRef.current) return;
-
-    fetch(imageRef.current.src)
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error(`Download failed (${response.status})`);
-        }
-        return response.blob();
-      })
-      .then((blob) => {
-        const url = window.URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = "image.png";
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        window.URL.revokeObjectURL(url);
-      })
-      // Without this the promise chain rejected unhandled and the click did
-      // nothing visible at all.
-      .catch((error) => {
-        console.error(error);
-        alert("Could not download the image. Please try again.");
-      });
-  };
+  const savedPercentage =
+    uploaded && uploaded.originalBytes > 0
+      ? Math.round((1 - uploaded.bytes / uploaded.originalBytes) * 100)
+      : null;
 
   return (
     <div className="container mx-auto p-4 max-w-4xl">
-      <h1 className="text-3xl font-bold mb-6 text-center">
+      <h1 className="text-3xl font-bold mb-2 text-center">
         Social Media Image Creator
       </h1>
+      <p className="text-center text-sm opacity-70 mb-6">
+        Cropped and compressed locally with sharp. Nothing is sent to a media API.
+      </p>
 
       <div className="card">
         <div className="card-body">
           <h2 className="card-title mb-4">Upload an Image</h2>
+
+          {error && (
+            <div role="alert" className="alert alert-error mb-4">
+              <span>{error}</span>
+            </div>
+          )}
+
           <div className="form-control">
-            <label className="label">
-              <span className="label-text">Choose an image file</span>
+            <label className="label" htmlFor="image-file">
+              <span className="label-text">
+                Choose an image file (max {formatBytes(MAX_IMAGE_BYTES)})
+              </span>
             </label>
             <input
+              id="image-file"
               type="file"
+              accept={IMAGE_MIME_TYPES.join(",")}
+              disabled={isUploading}
               onChange={handleFileUpload}
               className="file-input file-input-bordered file-input-primary w-full"
             />
           </div>
 
           {isUploading && (
-            <div className="mt-4">
-              <progress className="progress progress-primary w-full"></progress>
+            <div className="mt-4 flex items-center gap-3">
+              <span className="loading loading-spinner" />
+              <span className="text-sm">Uploading and re-encoding…</span>
             </div>
           )}
 
-          {uploadedImage && (
+          {uploaded && previewUrl && (
             <div className="mt-6">
               <h2 className="card-title mb-4">Select Social Media Format</h2>
               <div className="form-control">
                 <select
+                  aria-label="Social media format"
                   className="select select-bordered w-full"
                   value={selectedFormat}
-                  onChange={(e) =>
-                    setSelectedFormat(e.target.value as SocialFormat)
+                  onChange={(event) =>
+                    setSelectedFormat(event.target.value as SocialFormatId)
                   }
                 >
-                  {Object.keys(SocialFormats).map((format) => (
-                    <option key={format} value={format}>
-                      {format}
+                  {SOCIAL_FORMAT_IDS.map((id) => (
+                    <option key={id} value={id}>
+                      {SOCIAL_FORMATS[id].label}
                     </option>
                   ))}
                 </select>
               </div>
 
               <div className="mt-6 relative">
-                <h3 className="text-lg font-semibold mb-2">Preview:</h3>
+                <h3 className="text-lg font-semibold mb-2">
+                  Preview: {SOCIAL_FORMATS[selectedFormat].width}×
+                  {SOCIAL_FORMATS[selectedFormat].height}
+                </h3>
                 <div className="flex justify-center">
                   {isTransforming && (
                     <div className="absolute inset-0 flex items-center justify-center bg-base-100 bg-opacity-50 z-10">
-                      <span className="loading loading-spinner loading-lg"></span>
+                      <span className="loading loading-spinner loading-lg" />
                     </div>
                   )}
-                  <CldImage
-                    width={SocialFormats[selectedFormat].width}
-                    height={SocialFormats[selectedFormat].height}
-                    src={uploadedImage}
-                    sizes="100vw"
-                    alt="transformed image"
-                    crop="fill"
-                    aspectRatio={SocialFormats[selectedFormat].aspectRatio}
-                    gravity="auto"
-                    ref={imageRef}
+                  {/* The API already returns a correctly sized, private WebP, so
+                      next/image would only add a second optimisation hop. */}
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    key={previewUrl}
+                    src={previewUrl}
+                    alt={`Preview cropped to ${SOCIAL_FORMATS[selectedFormat].label}`}
+                    className="max-w-full h-auto"
                     onLoad={() => setIsTransforming(false)}
+                    onError={() => {
+                      setIsTransforming(false);
+                      setError("The preview could not be generated. Try uploading again.");
+                    }}
                   />
                 </div>
               </div>
 
+              <p className="mt-4 text-sm opacity-70">
+                Stored copy: {uploaded.width}×{uploaded.height},{" "}
+                {formatBytes(uploaded.bytes)}
+                {savedPercentage !== null && savedPercentage > 0
+                  ? ` (${savedPercentage}% smaller than the original)`
+                  : ""}
+              </p>
+
               <div className="card-actions justify-end mt-6">
-                <button className="btn btn-primary" onClick={handleDownload}>
-                  Download for {selectedFormat}
-                </button>
+                <a
+                  className="btn btn-primary"
+                  href={`${previewUrl}&download=1`}
+                  download
+                >
+                  Download for {SOCIAL_FORMATS[selectedFormat].label}
+                </a>
               </div>
             </div>
           )}

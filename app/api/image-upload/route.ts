@@ -1,66 +1,57 @@
 import { NextRequest, NextResponse } from "next/server";
-import { v2 as cloudinary } from "cloudinary";
 import { auth } from "@clerk/nextjs/server";
+import { normaliseUpload } from "@/lib/imagePipeline";
+import { newImageId, saveImage } from "@/lib/imageStore";
+import { tooManyRequests, uploadRateLimiter } from "@/lib/rateLimiters";
+import { IMAGE_UPLOAD_RULES, validateUpload } from "@/lib/uploadValidation";
 
-// Configuration
-cloudinary.config({
-  cloud_name: process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET, // Click 'View Credentials' below to copy your API secret
-});
-
-interface CloudinaryUploadResult {
-  public_id: string;
-  [key: string]: unknown;
-}
+// sharp is a native module, so this handler must not run on the edge runtime.
+export const runtime = "nodejs";
 
 export async function POST(request: NextRequest) {
   const { userId } = await auth();
-
   if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const limit = uploadRateLimiter.check(userId);
+  if (!limit.allowed) {
+    return tooManyRequests(limit.retryAfterSeconds);
+  }
+
+  let file: File | null;
   try {
     const formData = await request.formData();
-    const file = formData.get("file") as File | null;
+    file = formData.get("file") as File | null;
+  } catch {
+    return NextResponse.json({ error: "Malformed upload" }, { status: 400 });
+  }
 
-    if (!file) {
-      return NextResponse.json({ error: "File not found" }, { status: 400 });
-    }
+  const validation = validateUpload(file, IMAGE_UPLOAD_RULES);
+  if (!validation.ok) {
+    return NextResponse.json({ error: validation.error }, { status: validation.status });
+  }
 
-    const bytes = await file.arrayBuffer();
-    const buffer = Buffer.from(bytes);
-    console.log("buffer size:", buffer.length);
+  try {
+    const buffer = Buffer.from(await file!.arrayBuffer());
+    // Decoding here is what turns a declared Content-Type into a verified one:
+    // bytes that are not a real image throw before anything is written to disk.
+    const normalised = await normaliseUpload(buffer);
+    const id = newImageId();
+    await saveImage(userId, id, normalised.buffer);
 
-    const result = await new Promise<CloudinaryUploadResult>(
-      (resolve, reject) => {
-        const uploadStream = cloudinary.uploader.upload_stream(
-          { folder: "next-cloudinary-uploads" },
-          (error, result) => {
-            if (error) {
-              console.log("Upload image failed", error);
-              reject(error);
-            } else resolve(result as CloudinaryUploadResult);
-          }
-        );
-        uploadStream.end(buffer);
-      }
-    );
-    return NextResponse.json(
-      {
-        publicId: result.public_id,
-      },
-      {
-        status: 200,
-      }
-    );
+    return NextResponse.json({
+      id,
+      width: normalised.width,
+      height: normalised.height,
+      bytes: normalised.bytes,
+      originalBytes: buffer.length,
+    });
   } catch (error) {
-    if (error instanceof Error) {
-      console.log("upload image failed", error.message);
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
-    console.log("Upload image failed", error);
-    return NextResponse.json({ error: "Upload image failed" }, { status: 500 });
+    console.error("Image upload failed", error);
+    return NextResponse.json(
+      { error: "That file could not be read as an image" },
+      { status: 400 }
+    );
   }
 }
