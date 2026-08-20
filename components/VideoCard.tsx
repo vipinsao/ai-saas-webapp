@@ -53,7 +53,8 @@ const VideoCard: React.FC<VideoCardProps> = ({
   }, []);
 
   const formatSize = useCallback((size: number) => {
-    return filesize(size);
+    // filesize() throws on NaN, which a malformed row would otherwise trigger.
+    return Number.isFinite(size) ? filesize(size) : "unknown";
   }, []);
 
   const formatDuration = useCallback((seconds: number) => {
@@ -62,9 +63,15 @@ const VideoCard: React.FC<VideoCardProps> = ({
     return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
   }, []);
 
-  const compressionPercentage = Math.round(
-    (1 - Number(video.compressedSize) / Number(video.originalSize)) * 100
-  );
+  const originalBytes = Number(video.originalSize);
+  const compressedBytes = Number(video.compressedSize);
+  // A zero or unparseable original size used to render "Infinity%" / "NaN%".
+  const compressionPercentage =
+    Number.isFinite(originalBytes) &&
+    originalBytes > 0 &&
+    Number.isFinite(compressedBytes)
+      ? Math.round((1 - compressedBytes / originalBytes) * 100)
+      : null;
 
   useEffect(() => {
     setPreviewError(false);
@@ -125,21 +132,25 @@ const VideoCard: React.FC<VideoCardProps> = ({
             <FileUp size={18} className="mr-2 text-primary" />
             <div>
               <div className="font-semibold">Original</div>
-              <div>{formatSize(Number(video.originalSize))}</div>
+              <div>{formatSize(originalBytes)}</div>
             </div>
           </div>
           <div className="flex items-center">
             <FileDown size={18} className="mr-2 text-secondary" />
             <div>
               <div className="font-semibold">Compressed</div>
-              <div>{formatSize(Number(video.compressedSize))}</div>
+              <div>{formatSize(compressedBytes)}</div>
             </div>
           </div>
         </div>
         <div className="flex justify-between items-center mt-4">
           <div className="text-sm font-semibold">
             Compression:{" "}
-            <span className="text-accent">{compressionPercentage}%</span>
+            <span className="text-accent">
+              {compressionPercentage === null
+                ? "n/a"
+                : `${compressionPercentage}%`}
+            </span>
           </div>
 
           <div className="flex flex-row gap-2">

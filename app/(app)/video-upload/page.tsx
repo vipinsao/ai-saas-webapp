@@ -12,17 +12,17 @@ function VideoUpload() {
   const [isUploading, setIsUploading] = useState(false);
 
   const router = useRouter();
-  //max file size of mb
 
-  const MAX_FILE_SIZE = 200 * 1024 * 1024;
+  const MAX_FILE_SIZE_MB = 200;
+  const MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file) return;
 
     if (file.size > MAX_FILE_SIZE) {
-      //Todo:add notification
-      toast.error("File size is too large. Max size is 5MB.", {
+      // The message used to say 5MB while the constant allowed 200MB.
+      toast.error(`File is too large. Maximum size is ${MAX_FILE_SIZE_MB}MB.`, {
         position: "top-right",
         autoClose: 5000, // Close after 5 seconds
         hideProgressBar: false,
@@ -39,7 +39,6 @@ function VideoUpload() {
     formdata.append("file", file);
     formdata.append("title", title);
     formdata.append("description", description);
-    formdata.append("originalSize", file.size.toString());
 
     try {
       const response = await axios.post("/api/video-upload", formdata);
@@ -48,7 +47,9 @@ function VideoUpload() {
         toast.success("File uploaded successfully!", {
           position: "top-right",
           autoClose: 3000,
-          onClose: () => router.push("/videos"),
+          // Used to push to /videos, which is not a route in this app, so a
+          // successful upload always landed the user on a 404.
+          onClose: () => router.push("/home"),
         });
       } else {
         toast.warn("Unexpected response from the server.", {
@@ -57,7 +58,14 @@ function VideoUpload() {
         });
       }
     } catch (error) {
-      console.log(error);
+      // Previously only logged to the console, so a failed upload looked
+      // identical to no upload at all from the user's point of view.
+      console.error(error);
+      const message =
+        axios.isAxiosError(error) && error.response
+          ? error.response.data?.error ?? `Upload failed (${error.response.status})`
+          : "Upload failed. Check your connection and try again.";
+      toast.error(message, { position: "top-right", autoClose: 5000 });
     } finally {
       setIsUploading(false);
     }

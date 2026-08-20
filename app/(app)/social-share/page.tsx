@@ -59,7 +59,12 @@ export default function SocialShare() {
     if (!imageRef.current) return;
 
     fetch(imageRef.current.src)
-      .then((response) => response.blob())
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Download failed (${response.status})`);
+        }
+        return response.blob();
+      })
       .then((blob) => {
         const url = window.URL.createObjectURL(blob);
         const link = document.createElement("a");
@@ -69,6 +74,12 @@ export default function SocialShare() {
         link.click();
         document.body.removeChild(link);
         window.URL.revokeObjectURL(url);
+      })
+      // Without this the promise chain rejected unhandled and the click did
+      // nothing visible at all.
+      .catch((error) => {
+        console.error(error);
+        alert("Could not download the image. Please try again.");
       });
   };
 

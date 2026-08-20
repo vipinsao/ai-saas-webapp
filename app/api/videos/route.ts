@@ -1,9 +1,15 @@
 import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { auth } from "@clerk/nextjs/server";
+import { prisma } from "@/lib/prisma";
 
 export async function GET() {
+  // The middleware already rejects anonymous API calls, but the handler repeats
+  // the check so the route is still safe if the matcher config ever changes.
+  const { userId } = await auth();
+  if (!userId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
     const videos = await prisma.video.findMany({
       orderBy: { createdAt: "desc" },
@@ -15,7 +21,5 @@ export async function GET() {
       { error: "Error fetching videos" },
       { status: 500 }
     );
-  } finally {
-    await prisma.$disconnect();
   }
 }

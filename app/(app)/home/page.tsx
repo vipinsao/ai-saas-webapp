@@ -11,7 +11,7 @@ function Home() {
 
   const fetchVideos = useCallback(async () => {
     try {
-      const response = await axios.get("api/videos");
+      const response = await axios.get("/api/videos");
       if (Array.isArray(response.data)) {
         setVideos(response.data);
       } else {

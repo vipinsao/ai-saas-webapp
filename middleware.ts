@@ -1,45 +1,45 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
-// Public routes
-const isPublicRoute = createRouteMatcher(["/sign-in", "/sign-up"]);
-
-const isPublicApiRoute = createRouteMatcher(["/api/videos"]);
+/**
+ * Clerk renders sign-in and sign-up on optional catch-all routes, and it
+ * navigates to sub-paths during a flow (for example
+ * /sign-up/verify-email-address for the emailed code). The matchers therefore
+ * have to cover those sub-paths, otherwise the middleware bounces a
+ * mid-flow user back to /sign-in and the flow can never complete.
+ */
+const isPublicRoute = createRouteMatcher(["/sign-in(.*)", "/sign-up(.*)"]);
 
 export default clerkMiddleware(async (auth, req) => {
   const { userId } = await auth();
-  const currentUrl = new URL(req.url);
-  const pathname = currentUrl.pathname;
+  const pathname = new URL(req.url).pathname;
   const isApiRequest = pathname.startsWith("/api");
 
-  // 🚀 Redirect root ("/") based on login status
-  if (pathname === "/") {
-    return userId
-      ? NextResponse.redirect(new URL("/home", req.url)) // If logged in, go to /home
-      : NextResponse.redirect(new URL("/sign-in", req.url)); // If not logged in, go to /sign-in
+  if (!userId) {
+    // API callers get a status code they can branch on. Redirecting an XHR to
+    // the sign-in page makes fetch/axios resolve with a 200 HTML document,
+    // which the calling code then mistakes for a successful request.
+    if (isApiRequest) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    if (!isPublicRoute(req)) {
+      return NextResponse.redirect(new URL("/sign-in", req.url));
+    }
+    return NextResponse.next();
   }
 
-  // ✅ If logged in and accessing public routes like sign-in or sign-up, redirect to /home
-  if (userId && isPublicRoute(req)) {
+  // Signed in: the root page is unused boilerplate and the auth screens are
+  // pointless, so send both to the dashboard.
+  if (pathname === "/" || isPublicRoute(req)) {
     return NextResponse.redirect(new URL("/home", req.url));
   }
 
-  // ❌ If NOT logged in and trying to access private routes (like /home)
-  if (!userId) {
-    if (!isPublicRoute(req) && !isPublicApiRoute(req)) {
-      return NextResponse.redirect(new URL("/sign-in", req.url));
-    }
-
-    // For protected API requests
-    if (isApiRequest && !isPublicApiRoute(req)) {
-      return NextResponse.redirect(new URL("/sign-in", req.url));
-    }
-  }
-
-  // Allow valid requests to proceed
   return NextResponse.next();
 });
 
 export const config = {
+  // First pattern: every page route except files (anything with a dot) and
+  // Next internals. Second pattern: every API route, including ones whose path
+  // contains a dot, which the first pattern would skip.
   matcher: ["/((?!.*\\..*|_next).*)", "/", "/(api|trpc)(.*)"],
 };

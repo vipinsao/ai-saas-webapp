@@ -1,22 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { v2 as cloudinary } from "cloudinary";
 import { auth } from "@clerk/nextjs/server";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 
-//we are connecting to our database so that as reponse we will sttore it our database
-const prisma = new PrismaClient();
-
-// Configuration
+// cloud_name is safe in the browser bundle (it is part of every delivery URL);
+// the key and secret are server-only and must never gain a NEXT_PUBLIC_ prefix.
 cloudinary.config({
-  //this can be used via client side also thats why we are using next_public_cloud_name
   cloud_name: process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME,
-
-  //this should be highly secured
   api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET, // Click 'View API Keys' above to copy your API secret
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-//because we are using typescript thats why this is important
 interface CloudinaryUploadResult {
   public_id: string;
   bytes: number;
@@ -26,17 +20,16 @@ interface CloudinaryUploadResult {
 
 export async function POST(request: NextRequest) {
   try {
-    //todo we have to check for user authentication
     const { userId } = await auth();
     if (!userId) {
       return NextResponse.json(
         { error: "User not authenticated" },
-        { status: 401 } // Unauthorized
+        { status: 401 }
       );
     }
 
     if (
-      !process.env.Next_PUBLIC_CLOUDINARY_CLOUD_NAME ||
+      !process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME ||
       !process.env.CLOUDINARY_API_SECRET ||
       !process.env.CLOUDINARY_API_KEY
     ) {
@@ -50,13 +43,11 @@ export async function POST(request: NextRequest) {
     const file = (formData.get("file") as File) || null;
     const title = formData.get("title") as string;
     const description = formData.get("description") as string;
-    const originalSize = formData.get("originalSize") as string;
 
     if (!file) {
       return NextResponse.json({ error: "No file found" }, { status: 400 });
     }
 
-    //for uploading any kind of file to cloudinary
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
 
@@ -76,24 +67,26 @@ export async function POST(request: NextRequest) {
         uploadStream.end(buffer);
       }
     );
+
     const video = await prisma.video.create({
       data: {
         title,
         description,
         publicId: result.public_id,
-        originalSize: originalSize,
+        // Measured server-side. The original size used to be read from a form
+        // field, so the compression figure was whatever the client claimed, and
+        // a request that omitted the field failed on a NOT NULL column.
+        originalSize: String(buffer.length),
         compressedSize: String(result.bytes),
         duration: result.duration || 0,
       },
     });
     return NextResponse.json(video);
   } catch (error) {
-    console.log("Upload video failed", error);
+    console.error("Upload video failed", error);
     return NextResponse.json(
       { error: "Error uploading video" },
       { status: 500 }
     );
-  } finally {
-    await prisma.$disconnect();
   }
 }
