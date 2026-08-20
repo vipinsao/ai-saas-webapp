@@ -10,6 +10,13 @@
  * the shell's authority, which is the correct authority for a maintenance job.
  *
  * Needs DATABASE_URL, and IMAGE_STORAGE_DIR if the store is not the default.
+ * Both come from .env, the file the README's setup step creates. `npm run dev`
+ * and `npm run build` get that for free because Next.js loads .env itself; a
+ * bare tsx script does not, so the npm script passes --env-file-if-exists=.env.
+ * Without it, following the documented setup and then running this command
+ * fails with "Environment variable not found: DATABASE_URL". A real environment
+ * variable still wins -- the flag does not overwrite what is already set, and
+ * the "if-exists" form keeps the command working with no .env at all.
  */
 import { defaultStorageRoot } from "../lib/imageStore";
 import { prismaImageIndex } from "../lib/prismaMediaIndex";
