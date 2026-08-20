@@ -8,7 +8,7 @@ copy back. Images are processed locally with `sharp`; video goes to Cloudinary.
 
 ```bash
 npm install
-npm test        # 179 tests, ~5 seconds
+npm test        # 179 tests, ~5 seconds, no keys
 ```
 
 No accounts, no database, no environment variables, no network. That suite is
@@ -19,6 +19,33 @@ against an in-memory index and a stubbed Cloudinary. If you only have five
 minutes, spend them there and in `DECISIONS.md` rather than on setup.
 
 Running the app itself needs Postgres and a free Clerk key — see [Setup](#setup).
+
+![Social share page](assets/image-upload.png)
+
+*Out of date: taken before the `sharp` rewrite and before the uploads list
+existed. The layout is the same; the page now also shows the stored dimensions,
+the compression saved, a storage-quota bar, a list of your uploads with a Delete
+button on each, and error states. Replacing it needs a browser and a Clerk
+account, neither of which was available, so it is captioned rather than quietly
+left to mislead.*
+
+## Where this came from
+
+It began in May 2025 as a learning project: five commits, a package still named
+`cloudinary-saas`, and a README describing distributed computing, Kubernetes, AI
+analysis pipelines and an API ecosystem — none of which existed then or now. In
+August 2026 I read the request flow properly. Every account was being handed
+every other account's Cloudinary `publicId`, because the video query was
+unscoped and uploads used the public delivery type; the upload endpoint had no
+validation and no rate limit; the image format was decided from the
+`Content-Type` the client typed, so 119 bytes of SVG declared `image/png` passed
+every check and cost 4,967ms of CPU in `sharp`; request bodies were measured
+after being buffered, so 250MB offered was parsed in full at about 1GB RSS; and
+the first orphan reaper I wrote had its two sides backwards — a missing storage
+directory made every row look like an orphan and it would have deleted the lot.
+Images moved off Cloudinary to local `sharp`, which is what made exact output
+dimensions testable at all. Two things I cannot fix from here, because they are
+the owner's to do, are named at the bottom of this file rather than left out.
 
 ## The image path, end to end
 
@@ -77,15 +104,6 @@ deleted image stops being served the moment its row is gone rather than when
 its bytes are. Both halves use Prisma (`prisma/schema.prisma`: an `Image` row
 per stored file, a `Video` row per Cloudinary asset) with every query filtered
 by `userId`.
-
-![Social share page](assets/image-upload.png)
-
-*This screenshot is out of date. It was taken before the `sharp` rewrite and
-before the uploads list existed. The layout is the same, but the page now also
-shows the stored dimensions, the compression saved, a storage-quota bar, a list
-of your uploads with a Delete button on each, and error states. Replacing it
-needs a browser and a Clerk account; neither was available when this section
-was written, so it is captioned rather than quietly left to mislead.*
 
 ## Setup
 
@@ -185,6 +203,10 @@ write ordering asserted are the ones a request actually gets.
 
 There are still no browser tests, and no test talks to Postgres, Clerk or
 Cloudinary.
+
+CI (`.github/workflows/ci.yml`) runs `npm ci`, `prisma generate`, lint,
+typecheck, this suite and the production build on every push and pull request —
+the same commands as above, so nothing here passes only on my machine.
 
 ## Media lifecycle
 
@@ -288,6 +310,7 @@ Known gaps, in rough order of how much they would matter:
 - **The video upload is a single buffered request**, so a large file is held in
   memory on the server. The browser now shows upload progress, but there is no
   resumability.
+
 ### Two things only the repository owner can do
 
 **1. Any video uploaded before the `authenticated` change is still public.**
@@ -317,10 +340,6 @@ clone has to re-clone. The mirror's contents were swept and hold **no secrets** 
 this is repository weight and a bad first impression, not an exposure. It is
 listed as an owner action because rewriting published history is the owner's
 call, not a change to make on their behalf.
-
-An earlier version of this README described distributed computing, Kubernetes,
-AI analysis pipelines and an API ecosystem. None of that existed then or now;
-it has been replaced with what the code actually does.
 
 ## Licence
 
