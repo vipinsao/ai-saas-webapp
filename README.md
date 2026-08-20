@@ -49,6 +49,11 @@ the owner's to do, are named at the bottom of this file rather than left out.
 
 ## The image path, end to end
 
+[ARCHITECTURE.md](./ARCHITECTURE.md) is the system-architecture document: trust
+boundaries, the ports-and-factories layering, the crash-consistency argument
+behind the two write orders, concurrency, failure modes and honest scope. The
+flowchart below is the happy path.
+
 ```mermaid
 flowchart TD
     A["Browser - /social-share"] -->|"POST multipart/form-data"| B["middleware.ts"]
