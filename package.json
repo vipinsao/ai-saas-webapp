@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test \"tests/*.test.ts\""
+    "test": "node --import tsx --test \"tests/*.test.ts\"",
+    "reap": "tsx scripts/reap-orphans.ts"
   },
   "dependencies": {
     "@clerk/nextjs": "^6.39.6",
