@@ -16,6 +16,9 @@ datasource db {
 
 model Video{
   id          String    @id @default(cuid())
+  /// Clerk user id of the uploader. Every query filters on it, so one account
+  /// never sees another account's uploads.
+  userId      String
   title       String
   description String?
   publicId    String
@@ -24,4 +27,7 @@ model Video{
   duration    Float
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+
+  // Matches the only list query in the app: filter by owner, newest first.
+  @@index([userId, createdAt])
 }

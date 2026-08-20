@@ -12,6 +12,9 @@ export async function GET() {
 
   try {
     const videos = await prisma.video.findMany({
+      // Scoped to the caller. Without this filter every account saw every
+      // other account's uploads.
+      where: { userId },
       orderBy: { createdAt: "desc" },
     });
     return NextResponse.json(videos);

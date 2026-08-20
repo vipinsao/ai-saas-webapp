@@ -1,12 +1,10 @@
 import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
-import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 /**
  * The dashboard has always had a delete button, but no route answered
- * DELETE /api/videos/:id, so every click 404'd and the card silently
- * disappeared from the list until the next refresh.
+ * DELETE /api/videos/:id, so every click 404'd.
  */
 export async function DELETE(
   _request: Request,
@@ -23,20 +21,16 @@ export async function DELETE(
   }
 
   try {
-    await prisma.video.delete({ where: { id } });
-    return NextResponse.json({ id, deleted: true });
-  } catch (error: unknown) {
-    // P2025 is Prisma's "record to delete does not exist".
-    if (
-      error instanceof Prisma.PrismaClientKnownRequestError &&
-      error.code === "P2025"
-    ) {
+    // deleteMany rather than delete: the ownership filter and the delete happen
+    // in one statement, and a row belonging to somebody else is reported as
+    // "not found" rather than "forbidden", which would confirm it exists.
+    const { count } = await prisma.video.deleteMany({ where: { id, userId } });
+    if (count === 0) {
       return NextResponse.json({ error: "Video not found" }, { status: 404 });
     }
+    return NextResponse.json({ id, deleted: true });
+  } catch (error: unknown) {
     console.error("Error deleting video:", error);
-    return NextResponse.json(
-      { error: "Error deleting video" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Error deleting video" }, { status: 500 });
   }
 }
