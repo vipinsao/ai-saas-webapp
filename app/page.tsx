@@ -1,101 +1,101 @@
 import Image from "next/image";
+import Link from "next/link";
 
-export default function Home() {
+/**
+ * The public landing page.
+ *
+ * This route was the untouched `create-next-app` template -- the Next.js logo,
+ * "Get started by editing app/page.tsx", and links to Vercel. It was also
+ * unreachable: the middleware sent "/" to /home when signed in and to /sign-in
+ * when not, so a visitor met a Clerk login box with nothing explaining what the
+ * app was for, and nobody ever saw that the page was still boilerplate.
+ *
+ * "/" is a public route now, so this is what a signed-out visitor lands on.
+ * Everything claimed below is something the code in this repo does.
+ */
+export const metadata = {
+  title: "Social Share — crop images for social media, compress video",
+  description:
+    "Upload an image and crop it to the social-media aspect ratios, or upload a video and get a compressed copy. Images are processed locally with sharp.",
+};
+
+const features = [
+  {
+    title: "Images are processed on this server",
+    body: "sharp decodes the upload, applies its EXIF orientation, strips the rest of the metadata (GPS included) and re-encodes to WebP. No media API is involved and no account is needed for this half.",
+  },
+  {
+    title: "Five crops, computed on request",
+    body: "Instagram square and portrait, Twitter post and header, Facebook cover. Each one is cropped when you ask for it, using the highest-detail region rather than the centre, so a subject near an edge survives the crop.",
+  },
+  {
+    title: "Video compression through Cloudinary",
+    body: "A video upload is transcoded by Cloudinary and the before and after sizes are recorded. This half needs a Cloudinary account; without one the app says so plainly and the image half keeps working.",
+  },
+  {
+    title: "Your uploads are yours",
+    body: "Every file is scoped to the account that uploaded it, listed only for that account, and kept until it is deleted — within a per-account storage limit.",
+  },
+];
+
+export default function LandingPage() {
   return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
+    <main className="min-h-screen px-6 py-16">
+      <div className="mx-auto max-w-3xl">
+        <h1 className="text-4xl font-bold tracking-tight sm:text-5xl">Social Share</h1>
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+        <p className="mt-4 text-lg opacity-80">
+          Upload an image and get it cropped to the aspect ratios the social
+          networks ask for. Upload a video and get a compressed copy back.
+        </p>
+
+        <div className="mt-8 flex flex-wrap gap-3">
+          <Link href="/sign-in" className="btn btn-primary">
+            Sign in
+          </Link>
+          <Link href="/sign-up" className="btn btn-outline">
+            Create an account
+          </Link>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
+
+        <figure className="mt-12">
           <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
+            src="/screenshots/video-library.png"
+            alt="The video library: one card showing a thumbnail, the title, the original and compressed sizes, and the compression saved."
+            width={1915}
+            height={858}
+            priority
+            className="rounded-lg border border-base-300 w-full h-auto"
           />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
+          <figcaption className="mt-2 text-xs opacity-60">
+            The video library after an upload. Screenshot taken before the
+            controls on each card were reworked, so the buttons look slightly
+            different today.
+          </figcaption>
+        </figure>
+
+        <dl className="mt-12 grid gap-6 sm:grid-cols-2">
+          {features.map((feature) => (
+            <div key={feature.title}>
+              <dt className="font-semibold">{feature.title}</dt>
+              <dd className="mt-1 text-sm opacity-80">{feature.body}</dd>
+            </div>
+          ))}
+        </dl>
+
+        <p className="mt-12 text-xs opacity-60">
+          A portfolio project, built with Next.js, Clerk, Prisma and sharp.
+          Source:{" "}
+          <a
+            className="link"
+            href="https://github.com/vipinsao/ai-saas-webapp"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            github.com/vipinsao/ai-saas-webapp
+          </a>
+        </p>
+      </div>
+    </main>
   );
 }
