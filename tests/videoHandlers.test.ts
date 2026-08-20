@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { NextRequest } from "next/server";
 import {
   createVideoDeleteHandler,
+  createVideoListHandler,
   createVideoUploadHandler,
   envCloudinaryProvider,
   VIDEO_FOLDER,
@@ -438,5 +439,190 @@ describe("DELETE /api/videos/:id", () => {
 
     assert.equal(response.status, 503);
     assert.equal(index.rows.length, 1);
+  });
+});
+
+describe("GET /api/videos: signed delivery, no publicId (regression, H8)", () => {
+  function seeded() {
+    return createFakeVideoIndex([
+      videoRecord({ id: "vid_1", userId: "user_a", publicId: "video-uploads/mine", title: "Mine" }),
+      videoRecord({ id: "vid_2", userId: "user_b", publicId: "video-uploads/theirs" }),
+    ]);
+  }
+
+  it("never puts publicId in the response as a field of its own", async () => {
+    // While the list query was unscoped, every account received every other
+    // account's publicId -- and because uploads were public delivery, that id
+    // was on its own a working download link.
+    //
+    // Note what is NOT claimed here: a delivery URL necessarily contains the
+    // public id, so the string is still on the wire and pretending otherwise
+    // would be theatre. Two separate things fix this. The id is no longer a
+    // field the client reads or forwards, and -- the part that actually
+    // matters -- `type: "authenticated"` means holding the id buys nothing
+    // without a signature only this server can compute. That property is
+    // asserted in the suite below.
+    const list = createVideoListHandler({
+      auth: signedInAs("user_a"),
+      index: seeded(),
+      cloudinary: provider(),
+    });
+
+    const body = await (await list()).json();
+
+    assert.equal(body.length, 1);
+    assert.equal(body[0].publicId, undefined);
+    assert.deepEqual(Object.keys(body[0]).sort(), [
+      "compressedSize",
+      "createdAt",
+      "description",
+      "downloadUrl",
+      "duration",
+      "id",
+      "originalSize",
+      "previewUrl",
+      "thumbnailUrl",
+      "title",
+    ]);
+  });
+
+  it("lists only the caller's videos", async () => {
+    const list = createVideoListHandler({
+      auth: signedInAs("user_a"),
+      index: seeded(),
+      cloudinary: provider(),
+    });
+    const body = await (await list()).json();
+    assert.deepEqual(body.map((v: { id: string }) => v.id), ["vid_1"]);
+  });
+
+  it("hands out the three signed URLs the card needs", async () => {
+    const list = createVideoListHandler({
+      auth: signedInAs("user_a"),
+      index: seeded(),
+      cloudinary: provider(),
+    });
+    const [video] = await (await list()).json();
+    assert.match(video.thumbnailUrl, /sig=/);
+    assert.match(video.previewUrl, /sig=/);
+    assert.match(video.downloadUrl, /sig=/);
+  });
+
+  it("answers 503 rather than a list of dead links when unconfigured", async () => {
+    const list = createVideoListHandler({
+      auth: signedInAs("user_a"),
+      index: seeded(),
+      cloudinary: () => envCloudinaryProvider({}),
+    });
+    assert.equal((await list()).status, 503);
+  });
+
+  it("rejects an anonymous caller with 401", async () => {
+    const list = createVideoListHandler({
+      auth: signedInAs(null),
+      index: seeded(),
+      cloudinary: provider(),
+    });
+    assert.equal((await list()).status, 401);
+  });
+
+  it("does not return publicId from the upload response either", async () => {
+    const index = createFakeVideoIndex();
+    const upload = createVideoUploadHandler({
+      auth: signedInAs("user_a"),
+      index,
+      cloudinary: provider(),
+      limiter: permissiveLimiter(),
+    });
+    const body = await (await upload(uploadRequest())).json();
+    assert.equal(body.publicId, undefined);
+    assert.match(body.downloadUrl, /sig=/);
+  });
+});
+
+describe("Cloudinary asset type (regression, H8)", () => {
+  it("signs URLs against the authenticated delivery type, not public upload", async () => {
+    // Verified locally: signature generation is an HMAC over the transformation
+    // and the public id, so it can be asserted here. Whether Cloudinary ACCEPTS
+    // the signature is not verified -- no live account was ever used.
+    const resolved = envCloudinaryProvider(CONFIGURED);
+    assert.equal(resolved.ok, true);
+    if (!resolved.ok) return;
+
+    const urls = resolved.client.videoUrls("video-uploads/abc", "My Holiday Clip!");
+
+    for (const url of Object.values(urls)) {
+      assert.match(url, /\/video\/authenticated\//, "must not be the public /video/upload/ path");
+      assert.match(url, /\/s--[A-Za-z0-9_-]+--\//, "must carry a signature segment");
+    }
+    assert.match(urls.downloadUrl, /fl_attachment:My-Holiday-Clip/);
+    assert.match(urls.thumbnailUrl, /\.jpg/);
+    assert.match(urls.previewUrl, /e_preview:duration_15/);
+  });
+
+  it("binds the signature to the API secret", async () => {
+    const a = envCloudinaryProvider(CONFIGURED);
+    const b = envCloudinaryProvider({ ...CONFIGURED, CLOUDINARY_API_SECRET: "a-different-secret" });
+    assert.equal(a.ok && b.ok, true);
+    if (!a.ok || !b.ok) return;
+    assert.notEqual(
+      a.client.videoUrls("video-uploads/abc", "t").thumbnailUrl,
+      b.client.videoUrls("video-uploads/abc", "t").thumbnailUrl
+    );
+  });
+
+  it("uploads as authenticated so a bare publicId is not a download link", async () => {
+    const seen: Record<string, unknown>[] = [];
+    const { v2 } = await import("cloudinary");
+    const original = v2.uploader.upload_stream;
+    // Intercept at the SDK boundary: what matters is the options object that
+    // reaches Cloudinary, which the fake client cannot show.
+    (v2.uploader as unknown as { upload_stream: unknown }).upload_stream = ((
+      options: Record<string, unknown>,
+      callback: (e: unknown, r: unknown) => void
+    ) => {
+      seen.push(options);
+      return {
+        end: () => callback(null, { public_id: "video-uploads/x", bytes: 1, duration: 1 }),
+      };
+    }) as unknown as typeof original;
+
+    try {
+      const resolved = envCloudinaryProvider(CONFIGURED);
+      assert.equal(resolved.ok, true);
+      if (!resolved.ok) return;
+      await resolved.client.uploadVideo(Buffer.alloc(4), { folder: VIDEO_FOLDER });
+      assert.equal(seen[0].type, "authenticated");
+      assert.equal(seen[0].resource_type, "video");
+      assert.equal(seen[0].folder, VIDEO_FOLDER);
+    } finally {
+      (v2.uploader as unknown as { upload_stream: unknown }).upload_stream = original;
+    }
+  });
+
+  it("destroys with the same resource_type and type it uploaded with", async () => {
+    // A destroy whose `type` does not match the upload answers "not found" and
+    // leaves the asset in place -- a delete that reports success and deletes
+    // nothing, which is the exact bug the delete ordering was written to fix.
+    const seen: Array<[string, Record<string, unknown>]> = [];
+    const { v2 } = await import("cloudinary");
+    const original = v2.uploader.destroy;
+    (v2.uploader as unknown as { destroy: unknown }).destroy = (async (
+      publicId: string,
+      options: Record<string, unknown>
+    ) => {
+      seen.push([publicId, options]);
+      return { result: "ok" };
+    }) as unknown as typeof original;
+
+    try {
+      const resolved = envCloudinaryProvider(CONFIGURED);
+      assert.equal(resolved.ok, true);
+      if (!resolved.ok) return;
+      await resolved.client.destroyVideo("video-uploads/abc");
+      assert.deepEqual(seen[0][1], { resource_type: "video", type: "authenticated" });
+    } finally {
+      (v2.uploader as unknown as { destroy: unknown }).destroy = original;
+    }
   });
 });

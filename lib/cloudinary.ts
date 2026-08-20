@@ -74,6 +74,28 @@ export interface CloudinaryUploadResult {
   duration?: number;
 }
 
+/**
+ * The three delivery URLs the browser needs. They are minted on the server,
+ * per request, for videos the caller owns.
+ *
+ * Assets are uploaded as `type: "authenticated"`, so a delivery URL only works
+ * with a signature computed from the API secret. That secret cannot go to the
+ * browser, which is why these are handed out as finished URLs rather than the
+ * browser being given a `publicId` and left to build them: a publicId used to
+ * be enough on its own to fetch anyone's video from anywhere.
+ */
+export interface SignedVideoUrls {
+  thumbnailUrl: string;
+  previewUrl: string;
+  downloadUrl: string;
+}
+
+/** Cloudinary sends this as the saved filename via Content-Disposition. */
+export function attachmentName(title: string): string {
+  const safe = title.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  return safe.slice(0, 60) || "video";
+}
+
 export interface CloudinaryDestroyResult {
   /** "ok" when the asset was removed, "not found" when it was already gone. */
   result: string;
@@ -82,6 +104,8 @@ export interface CloudinaryDestroyResult {
 export interface CloudinaryClient {
   uploadVideo(buffer: Buffer, options: { folder: string }): Promise<CloudinaryUploadResult>;
   destroyVideo(publicId: string): Promise<CloudinaryDestroyResult>;
+  /** Local HMAC over the transformation and public id. No network call. */
+  videoUrls(publicId: string, title: string): SignedVideoUrls;
 }
 
 /**
@@ -106,6 +130,12 @@ export function createCloudinaryClient(config: CloudinaryConfig): CloudinaryClie
           {
             resource_type: "video",
             folder: options.folder,
+            // Uploads used to default to `type: "upload"`, which is public
+            // delivery: anyone holding the publicId could fetch the video from
+            // anywhere, with no session and no signature. "authenticated"
+            // makes the delivery URL useless without a signature that only
+            // this server can produce.
+            type: "authenticated",
             transformation: [{ quality: "auto", fetch_format: "mp4" }],
           },
           (error, result) => {
@@ -120,10 +150,47 @@ export function createCloudinaryClient(config: CloudinaryConfig): CloudinaryClie
 
     async destroyVideo(publicId) {
       configure();
-      // resource_type must be "video": destroy defaults to "image" and would
-      // report "not found" for a video that is very much still there.
-      const result = await cloudinary.uploader.destroy(publicId, { resource_type: "video" });
+      // Both fields must match the upload. resource_type defaults to "image"
+      // and type defaults to "upload"; either default alone makes destroy
+      // report "not found" for a video that is very much still there -- and a
+      // delete that reports success while leaving the asset behind is exactly
+      // the bug this handler was written to fix.
+      const result = await cloudinary.uploader.destroy(publicId, {
+        resource_type: "video",
+        type: "authenticated",
+      });
       return result as CloudinaryDestroyResult;
+    },
+
+    videoUrls(publicId, title) {
+      configure();
+      const base = { resource_type: "video", type: "authenticated", sign_url: true } as const;
+      return {
+        thumbnailUrl: cloudinary.url(publicId, {
+          ...base,
+          format: "jpg",
+          width: 400,
+          height: 225,
+          crop: "fill",
+          gravity: "auto",
+          quality: "auto",
+        }),
+        previewUrl: cloudinary.url(publicId, {
+          ...base,
+          width: 400,
+          height: 225,
+          raw_transformation: "e_preview:duration_15:max_seg_9:min_seg_dur_1",
+        }),
+        downloadUrl: cloudinary.url(publicId, {
+          ...base,
+          width: 1920,
+          height: 1080,
+          // Sets Content-Disposition: attachment server-side. The HTML
+          // `download` attribute cannot do this job -- browsers ignore it on a
+          // cross-origin URL.
+          flags: `attachment:${attachmentName(title)}`,
+        }),
+      };
     },
   };
 }
