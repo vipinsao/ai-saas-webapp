@@ -14,8 +14,10 @@ import {
   readImage,
   saveImage,
 } from "../imageStore";
+import { SNIFFABLE_FORMATS, sniffImageFormat } from "../imageSniff";
 import type { ImageIndex, ImageRecord } from "../mediaIndex";
 import { checkQuota, storageQuotaBytes } from "../quota";
+import { readLimitedFormData } from "../requestLimits";
 import { tooManyRequests, uploadRateLimiter, transformRateLimiter } from "../rateLimiters";
 import { IMAGE_UPLOAD_RULES, validateUpload } from "../uploadValidation";
 import type { AuthPort, RateLimiterPort, RouteContext } from "./deps";
@@ -59,26 +61,43 @@ export function createImageUploadHandler(deps: ImageHandlerDeps) {
     const limit = limiter.check(userId);
     if (!limit.allowed) return tooManyRequests(limit.retryAfterSeconds);
 
-    let file: File | null;
-    try {
-      const formData = await request.formData();
-      file = formData.get("file") as File | null;
-    } catch {
-      return NextResponse.json({ error: "Malformed upload" }, { status: 400 });
+    // Metered before it is buffered: `request.formData()` reads the whole body
+    // into memory and the App Router imposes no ceiling of its own, so the
+    // per-file rule below can only run on bytes the process already holds.
+    const body = await readLimitedFormData(request, IMAGE_UPLOAD_RULES.maxBytes);
+    if (!body.ok) {
+      return NextResponse.json({ error: body.error }, { status: body.status });
     }
+    const file = body.formData.get("file") as File | null;
 
     const validation = validateUpload(file, IMAGE_UPLOAD_RULES);
     if (!validation.ok) {
       return NextResponse.json({ error: validation.error }, { status: validation.status });
     }
 
+    const buffer = Buffer.from(await file!.arrayBuffer());
+    const originalBytes = buffer.length;
+
+    // Settle the format from the bytes BEFORE any decoder sees them. The
+    // Content-Type filter in validateUpload is what the client claimed; this is
+    // what the file is. Without it a 119-byte SVG declared as image/png reaches
+    // sharp, which rasterises it into seconds of CPU -- and the size cap does
+    // not help, because it bounds the compressed input, not the decoded pixels.
+    const sniffed = sniffImageFormat(buffer);
+    if (!sniffed) {
+      return NextResponse.json(
+        {
+          error:
+            `The file's contents are not a supported image. It was sent as ` +
+            `"${file!.type || "unknown"}", but the bytes match none of: ` +
+            `${SNIFFABLE_FORMATS.join(", ")}. SVG is not supported.`,
+        },
+        { status: 415 }
+      );
+    }
+
     let normalised;
-    let originalBytes: number;
     try {
-      const buffer = Buffer.from(await file!.arrayBuffer());
-      originalBytes = buffer.length;
-      // Decoding is what turns a declared Content-Type into a verified one:
-      // bytes that are not a real image throw before anything is written.
       normalised = await normaliseUpload(buffer);
     } catch (error) {
       console.error("Image upload failed", error);

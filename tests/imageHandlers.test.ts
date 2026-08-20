@@ -89,6 +89,49 @@ describe("POST /api/image-upload", () => {
     assert.deepEqual(await listStoredImages(root), []);
   });
 
+  it("rejects a decode bomb in milliseconds, not seconds (regression, C1)", async () => {
+    // 119 bytes of SVG declared as image/png. validateUpload passed it -- it
+    // only ever saw the declared type and the size -- and sharp then spent
+    // 4967 ms rasterising 8000x8000. At 10 uploads per minute per user that is
+    // 50 seconds of CPU per user per minute from a 119-byte request.
+    const bomb = Buffer.from(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="8000" height="8000"><rect width="100%" height="100%" fill="#f00"/></svg>'
+    );
+    const index = createFakeImageIndex();
+    const upload = createImageUploadHandler({
+      auth: signedInAs("user_a"),
+      index,
+      root,
+      limiter: permissiveLimiter(),
+    });
+
+    const startedAt = Date.now();
+    const response = await upload(uploadRequest(bomb, "image/png"));
+    const elapsed = Date.now() - startedAt;
+
+    assert.equal(response.status, 415);
+    assert.match((await response.json()).error, /SVG is not supported/);
+    assert.ok(elapsed < 2000, `took ${elapsed} ms; the bomb decoded in 4967 ms`);
+    assert.equal(index.rows.length, 0);
+    assert.deepEqual(await listStoredImages(root), []);
+  });
+
+  it("rejects bytes that are not any supported image, whatever the type says", async () => {
+    const index = createFakeImageIndex();
+    const upload = createImageUploadHandler({
+      auth: signedInAs("user_a"),
+      index,
+      root,
+      limiter: permissiveLimiter(),
+    });
+
+    for (const payload of ["%PDF-1.7 ...", "<!DOCTYPE html><html></html>", "PK\x03\x04"]) {
+      const response = await upload(uploadRequest(Buffer.from(payload), "image/png"));
+      assert.equal(response.status, 415, payload.slice(0, 12));
+    }
+    assert.deepEqual(await listStoredImages(root), []);
+  });
+
   it("rejects an anonymous caller before reading the body", async () => {
     const index = createFakeImageIndex();
     const upload = createImageUploadHandler({

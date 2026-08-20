@@ -7,6 +7,7 @@ import {
   SOCIAL_FORMATS,
   SOCIAL_FORMAT_IDS,
   isSocialFormatId,
+  MAX_STORED_DIMENSION,
   normaliseUpload,
   transformToSocialFormat,
 } from "../lib/imagePipeline";
@@ -111,5 +112,48 @@ describe("transformToSocialFormat", () => {
 
   it("rejects bytes that are not a decodable image", async () => {
     await assert.rejects(() => transformToSocialFormat(Buffer.from("nope"), "twitter-post"));
+  });
+});
+
+describe("decode limits (regression, C1)", () => {
+  it("refuses an oversized decode instead of spending seconds on it", async () => {
+    // Defence in depth: the upload handler settles the format from the bytes
+    // before this is called, but a caller that skipped that step must still
+    // not be able to buy 5 seconds of CPU with 119 bytes.
+    const bomb = Buffer.from(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="8000" height="8000"><rect width="100%" height="100%" fill="#f00"/></svg>'
+    );
+    const startedAt = Date.now();
+    await assert.rejects(() => normaliseUpload(bomb), /pixel limit/);
+    const elapsed = Date.now() - startedAt;
+    assert.ok(elapsed < 1000, `took ${elapsed} ms; unbounded it took 4967 ms`);
+  });
+
+  it("applies the same limit to the transform path", async () => {
+    const bomb = Buffer.from(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="8000" height="8000"><rect width="100%" height="100%" fill="#f00"/></svg>'
+    );
+    await assert.rejects(
+      () => transformToSocialFormat(bomb, "instagram-square"),
+      /pixel limit/
+    );
+  });
+
+  it("caps a stored image's longest edge, so later transforms stay cheap", async () => {
+    const huge = await sharp({
+      create: { width: 6000, height: 3000, channels: 3, background: "#123456" },
+    })
+      .png()
+      .toBuffer();
+
+    const stored = await normaliseUpload(huge);
+
+    assert.equal(stored.width, MAX_STORED_DIMENSION);
+    assert.equal(stored.height, MAX_STORED_DIMENSION / 2, "aspect ratio preserved");
+  });
+
+  it("leaves an image that is already within the cap alone", async () => {
+    const stored = await normaliseUpload(await fixture());
+    assert.ok(stored.width <= MAX_STORED_DIMENSION && stored.height <= MAX_STORED_DIMENSION);
   });
 });
