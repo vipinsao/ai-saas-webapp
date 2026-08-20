@@ -8,7 +8,7 @@ copy back. Images are processed locally with `sharp`; video goes to Cloudinary.
 
 ```bash
 npm install
-npm test        # 139 tests, ~4 seconds
+npm test        # 179 tests, ~5 seconds
 ```
 
 No accounts, no database, no environment variables, no network. That suite is
@@ -155,24 +155,26 @@ npm run dev        # next dev --turbopack
 npm run build      # prisma generate && next build
 npm run lint       # eslint .
 npm run typecheck  # tsc --noEmit
-npm test           # node:test via tsx — 139 tests
+npm test           # node:test via tsx — 179 tests
 npm run reap       # reconcile the image store against the Image table
 npm run reap -- --dry-run   # report what it would delete, delete nothing
 ```
 
 ## Tests
 
-`npm test` runs 139 assertions with no network and no database. Nine suites:
+`npm test` runs 179 assertions with no network and no database. Eleven suites:
 
 | Suite | What it pins down |
 | --- | --- |
 | `imagePipeline.test.ts` | exact output dimensions for all five presets against a committed fixture, EXIF orientation applied, EXIF metadata gone from the stored copy, upscaling of small sources, rejection of bytes that are not a decodable image |
+| `imageSniff.test.ts` | the format allowlist: every accepted signature, and SVG, PDF, HTML, ZIP, an ELF, an mp4 container and truncated input all refused |
+| `requestLimits.test.ts` | an over-sized `Content-Length` rejected without the body being touched, and a chunked body that lies about its size aborted part-way through |
 | `imageStore.test.ts` | id generation and validation, path traversal rejected on read **and on delete**, one user's id not resolving to another user's file, and the directory scan the reaper depends on |
 | `imageHandlers.test.ts` | the real upload / list / transform / delete handlers against an in-memory index and a temp directory: delete happy path, cross-user delete answered 404, traversing ids rejected without destroying anything, quota rejection, and the file being removed again when the row cannot be written |
-| `videoHandlers.test.ts` | the real video upload and delete handlers against a fake Cloudinary client: size accounting, ownership, every error path, and the delete that removes the remote asset before the row |
+| `videoHandlers.test.ts` | the real video upload, list and delete handlers against a fake Cloudinary client: size accounting, ownership, every error path, the delete that removes the remote asset before the row, and the signed-URL properties |
 | `cloudinaryConfig.test.ts` | missing, blank and misspelled environment variables; and each Cloudinary failure mapped to its own status and message |
 | `quota.test.ts` | the boundary byte, the 507 status, and a misconfigured limit falling back to the default |
-| `reaper.test.ts` | orphans reaped in both directions, the grace window that stops it racing a live upload, and the dry run |
+| `reaper.test.ts` | orphans reaped in both directions, the grace windows on **both** sides, the dry run, and four cases where an untrustworthy scan must refuse rather than delete |
 | `uploadValidation.test.ts` | every accept and reject path, including the exact status code per failure |
 | `rateLimit.test.ts` | window accounting and expiry, driven by an injected clock |
 
@@ -209,6 +211,26 @@ Each account has a storage quota (`IMAGE_STORAGE_QUOTA_BYTES`, default 100 MB).
 Going over it returns **507 Insufficient Storage**, not 413 — a 413 would tell
 the user to send a smaller file, when what they have to do is delete something.
 
+## What bounds a request
+
+Every limit here exists because something measured showed the previous one did
+not bind.
+
+| Limit | Where | What it stops |
+| --- | --- | --- |
+| `Content-Length` check, then a metered body stream | `lib/requestLimits.ts` | `formData()` buffers the whole body before any size rule can run, and the App Router has no cap of its own. 250 MB offered used to be parsed in full at ~1 GB RSS; it is now 413 after 12 MB and 28 ms |
+| Signature allowlist on the bytes | `lib/imageSniff.ts` | The `Content-Type` is whatever the client typed. 119 bytes of SVG declared `image/png` passed every check and cost 4967 ms of CPU in `sharp`. SVG has no signature, so it cannot be on an allowlist of signatures |
+| `limitInputPixels`, `.timeout()`, 4096px store cap | `lib/imagePipeline.ts` | The same bomb, if the allowlist is ever widened by mistake. `MAX_IMAGE_BYTES` bounds compressed input, which is the wrong axis — the cost is in decoded pixels |
+| Per-file size and MIME rules | `lib/uploadValidation.ts` | The precise per-file limits, once the body is safely in hand |
+| Per-user storage quota | `lib/quota.ts` | One account filling the disk 9 MB at a time |
+| Per-user fixed window | `lib/rateLimit.ts` | One browser hammering an endpoint. In-process only — see DECISIONS.md |
+| Refusal on an untrustworthy scan | `lib/reaper.ts` | A missing storage directory making every row in the index look like an orphan |
+
+Video assets are uploaded as `type: "authenticated"`, so a Cloudinary delivery
+URL needs a signature computed from the API secret. `GET /api/videos` mints
+those URLs per request for the caller's own rows and does not return
+`publicId`.
+
 ## Tech stack
 
 Everything below is in `package.json`.
@@ -217,21 +239,21 @@ Everything below is in `package.json`.
 - **Clerk** (`@clerk/nextjs`) for authentication
 - **Prisma 6** with PostgreSQL
 - **sharp 0.35** for local image decoding, cropping and WebP encoding
-- **Cloudinary** (`cloudinary`, `next-cloudinary`) for video upload and delivery
+- **Cloudinary** (`cloudinary`, server-side only) for video upload and delivery
 - **Tailwind CSS 3** with **daisyUI**, `lucide-react` icons, `react-toastify`
 - `axios`, `dayjs`, `filesize`
 - `tsx` + Node's built-in `node:test` runner
 
 ## Notes and limitations
 
-This is a small project: **37 TypeScript files outside `tests/`** (two of them
-config — `next.config.ts` and `tailwind.config.ts`), **9 test files** plus one
+This is a small project: **39 TypeScript files outside `tests/`** (two of them
+config — `next.config.ts` and `tailwind.config.ts`), **11 test files** plus one
 shared fixture module, **2 database tables**, **6 pages** and **7 HTTP
 endpoints across 6 route files**. Re-derive any of those with:
 
 ```bash
-git ls-files '*.ts' '*.tsx' | grep -v '^tests/' | wc -l   # 37
-git ls-files 'tests/*.test.ts' | wc -l                     # 9
+git ls-files '*.ts' '*.tsx' | grep -v '^tests/' | wc -l   # 39
+git ls-files 'tests/*.test.ts' | wc -l                     # 11
 grep -c '^model ' prisma/schema.prisma                     # 2
 ```
 
@@ -266,11 +288,35 @@ Known gaps, in rough order of how much they would matter:
 - **The video upload is a single buffered request**, so a large file is held in
   memory on the server. The browser now shows upload progress, but there is no
   resumability.
-- **`components/VideoCard.tsx` pulls in `next-cloudinary` (~162 kB) to build
-  three URL strings.** Hand-written template strings would remove most of
-  `/home`'s JavaScript. It has been left alone because the transformation
-  strings cannot be verified without a live Cloudinary account, and a wrong URL
-  fails silently as a broken image.
+### Two things only the repository owner can do
+
+**1. Any video uploaded before the `authenticated` change is still public.**
+Uploads used to default to Cloudinary's public delivery type, and for a period
+the video list query was unscoped, so every account was handed every other
+account's `publicId`. Those URLs still resolve, and no code change revokes them.
+The only remedy is to destroy the affected assets in the Cloudinary console (or
+via the Admin API) and re-upload them. New uploads are `type: "authenticated"`
+and need a signature.
+
+**2. A 1.2 MB packfile is still in this repository's git history.** An early
+commit added `AI-Saas-Webapp.git`, a bare mirror clone of the repository inside
+itself; `c0ad9d8` removed it from the working tree, which does not remove it
+from history. Verify and remove:
+
+```bash
+# still reachable, 1,274,937 bytes:
+git rev-list --all --objects -- 'AI-Saas-Webapp.git' | wc -l
+
+pipx install git-filter-repo         # or: pip install git-filter-repo
+git filter-repo --path AI-Saas-Webapp.git --invert-paths
+git push --force-with-lease origin main
+```
+
+This rewrites every commit hash, so it needs a force push and anyone with a
+clone has to re-clone. The mirror's contents were swept and hold **no secrets** —
+this is repository weight and a bad first impression, not an exposure. It is
+listed as an owner action because rewriting published history is the owner's
+call, not a change to make on their behalf.
 
 An earlier version of this README described distributed computing, Kubernetes,
 AI analysis pipelines and an API ecosystem. None of that existed then or now;

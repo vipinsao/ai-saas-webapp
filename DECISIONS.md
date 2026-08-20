@@ -199,6 +199,10 @@ handlers against a fake client. That establishes:
   and completes when Cloudinary reports the asset was already gone.
 
 It does **not** establish that the real SDK behaves the way the fake does.
+The `type: "authenticated"` change widens this: that uploads are stored as
+authenticated, that the signed URLs this code generates are accepted for
+delivery, and that `destroy` with `type: "authenticated"` finds them, are all
+unverified against the live service.
 Specifically unverified against the live service: that `upload_stream` with
 `resource_type: "video"` and `quality: auto, fetch_format: mp4` returns the
 `public_id`, `bytes` and `duration` fields the code reads; that a rejected
@@ -262,6 +266,121 @@ is how it ends up enabled somewhere it should not be. The placeholder key gets
 a stranger to a working landing page and a green test suite without that risk,
 and a real Clerk key is free and takes two minutes.
 
+## The reaper's two sides are not symmetrical, and the first version got it backwards
+
+Deleting an orphan file costs one image, and the file side was written
+carefully: a grace window, a skip counter, and a scan that only returns files it
+can prove it named. Deleting orphan rows costs the index, and that side had no
+grace window and no sanity check at all.
+
+`listStoredImages` answers `[]` when the root does not exist, because an empty
+store genuinely is not a crash. `reapOrphans` then built its set of "files that
+exist" from that empty list, and every row in the table matched "row whose file
+is gone". Reproduced with five rows and a missing directory: five orphan rows
+reported, zero rows left.
+
+The default root is `process.cwd()/storage/uploads`. An ephemeral filesystem, a
+fresh deploy, an unset `IMAGE_STORAGE_DIR`, or a cron entry that starts the
+process from the wrong directory all produce that ENOENT. This was one bad
+cron line away from destroying every user's index.
+
+The guards are deliberately blunt, because the asymmetry of the outcomes is
+blunt. A sweep that refuses to run is an alert somebody reads in the morning; a
+sweep that runs on a bad scan is a restore from backup. So: the root must exist
+and be a directory; zero files with rows present is treated as a broken mount
+rather than a table full of orphans; and rows get the same grace window files
+get. The refusal also fires on `--dry-run`, because a dry run reporting "would
+delete 5 rows" would be read as a finding about the data when it is a finding
+about the mount.
+
+Rows are read before the directory is scanned, too. An upload writes its file
+then its row, so reading rows first guarantees every row considered had its file
+written before the scan began — closing the quieter version of the same bug,
+where an upload landing mid-sweep looked like a row with no file.
+
+## The format is decided by the bytes, because decoding is the attack
+
+`validateUpload` filters on the `Content-Type` the browser sent, and the comment
+next to it used to say the pipeline "re-checks the real format by decoding the
+bytes with sharp". That is precisely backwards. Measured with the real
+validator and the verbatim sharp call:
+
+    payload: 119 bytes of SVG, sent as Content-Type: image/png
+    validateUpload -> { ok: true }
+    sharp ACCEPTED -> 8000x8000, 4967 ms
+
+`MAX_IMAGE_BYTES` does not help, and the reason is worth stating plainly: it
+bounds the *compressed* input, and the cost lives in the *decoded* pixels. The
+entire point of a decode bomb is that those two numbers are unrelated. A 10 MB
+cap on a format that can express "one billion pixels" in one line of text is
+not a limit on anything.
+
+So `lib/imageSniff.ts` settles the format from a signature before any decoder
+runs. It is an allowlist of binary signatures rather than a denylist of known
+bombs, and that is what makes it hold against the class instead of the
+instance: SVG is text and has no signature, so it cannot be on the list, and
+neither can markup, an archive, or a document, whatever header it arrives with.
+
+The decoder is bounded anyway — `limitInputPixels: 50_000_000` (sharp's own
+default is 268 MP), a 10-second pipeline timeout, and a 4096px cap on the
+stored image. Not belt-and-braces: an allowlist is a list, lists get edited, and
+the day somebody adds a format the pixel limit is what is left.
+
+The stored-image cap is a real behaviour change. A 6000x3000 upload is stored at
+4096x2048. No preset is above 1500px so nothing displayed changes; what changes
+is that a huge source is not re-decoded on every crop.
+
+## Request bodies are metered, not measured afterwards
+
+`await request.formData()` reads the entire body into memory, and the App Router
+puts no ceiling on it — Next's `bodySizeLimit` applies to Server Actions only.
+Every size rule in this app ran on `file.size`, which is knowable only after
+that has already happened. A 250 MB body was parsed in full, at about a
+gigabyte of RSS, and then rejected for being too large.
+
+Two gates, because either alone is bypassable. `Content-Length` is checked
+before the body is touched — cheap, and enough for honest clients. The stream is
+then metered regardless, and aborted the moment it passes the ceiling, which
+covers `Transfer-Encoding: chunked` and a client that lies in the header.
+
+What this does not do is make a large upload cheap. A legitimate 200 MB video
+still costs ~200 MB of RSS, because `formData()` materialises it. That is the
+single-buffered-request design, and it is listed as a limitation. The change is
+that the ceiling is the configured limit rather than whatever the caller sends.
+
+## Video assets are authenticated, and the browser is not trusted to build URLs
+
+Uploads passed `resource_type: "video"` and nothing else, so they took
+Cloudinary's default `type: "upload"`: public delivery. A `publicId` was, on its
+own, a working download link from anywhere, with no session and no signature.
+The client was handed that id and built its own delivery URLs from it — which
+only works at all *because* no secret was required.
+
+Two things follow, and only one of them is fixable in code.
+
+Fixable: uploads now use `type: "authenticated"`, `GET /api/videos` mints signed
+URLs per request for the caller's own rows, and `publicId` is not in the
+response. `destroyVideo` had to learn the same `type`, because a destroy whose
+type does not match the upload answers `{ result: "not found" }` and leaves the
+asset in place — a delete that reports success and deletes nothing, which is the
+exact failure the delete ordering was written to prevent.
+
+Not fixable: adding `where: { userId }` to the list query stopped new
+disclosure and revoked nothing. While that query was unscoped, every account
+received every other account's `publicId`, and those URLs still resolve. The
+remedy is to destroy and re-upload the affected assets, which is an owner
+action and is written down as one in the README.
+
+What is *not* claimed: that a signed URL hides the public id. It cannot — the id
+is a path segment. The property that matters is that holding it now buys
+nothing without a signature this server alone can compute. The tests assert that
+property (authenticated path, signature segment, signature changes with the
+secret) rather than the theatre.
+
+Signature generation is a local HMAC, so all of that is verifiable here.
+Whether Cloudinary *accepts* the signatures is not, and it widens the list
+below.
+
 ## Rate limiting is in-process, on purpose
 
 `lib/rateLimit.ts` is a fixed-window counter in a `Map`. No Redis, no hosted
@@ -324,4 +443,10 @@ regression is silent. There are no HTTP-level or browser tests.
 - **Object storage, shared-state rate limiting, background jobs, virus
   scanning, image dedup.** All reasonable next steps; none of them are here.
 - **A scheduler for the reaper.** `npm run reap` has to be put in cron by hand.
+- **Streaming multipart parsing.** The body is metered and aborted past the
+  limit, but a body inside the limit is still materialised in memory.
+- **Anything for video content.** Videos are not sniffed the way images are;
+  the declared type is the only filter, and the bytes go to Cloudinary, which
+  rejects what it cannot process. The cost of a bad video file is Cloudinary's,
+  not this server's, which is why the image side got the work.
 - **Any verification against live Cloudinary.** See above.
