@@ -53,9 +53,9 @@ export function formatBytes(bytes: number): string {
 
 /**
  * A browser can send any Content-Type it likes, so this is a first filter and
- * not a security boundary. The image pipeline re-checks the real format by
- * decoding the bytes with sharp; a file that only claims to be a PNG fails
- * there.
+ * not a security boundary. The real format is settled by `sniffImageFormat` in
+ * lib/imageSniff.ts, which matches a binary signature before any decoder runs.
+ * Decoding to find out what a file is would be the attack, not the check.
  */
 export function validateUpload(
   file: UploadCandidate | null,
