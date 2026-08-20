@@ -439,10 +439,11 @@ of one.
 
 ## 7. Concurrency
 
-There is no shared lock, no advisory lock and no transaction anywhere in this
-codebase. Four races exist; three are handled, and the handling is always the
-same move — make the decision a single statement, or make the outcome
-order-independent.
+Four races exist and all four are handled. Three by the same move — make the
+decision a single statement, or make the outcome order-independent. The fourth,
+the storage quota, is the one place that needed a lock: it is the only decision
+here whose input is an aggregate over rows that do not exist yet, and there is
+nothing for a second caller to block on until one is taken.
 
 **Delete is one statement, not read-then-write.**
 `deleteOwned` is `deleteMany({ where: { id, userId } })`
@@ -469,8 +470,15 @@ whole sweep (`lib/reaper.ts:182-188`).
 **The reaper racing a live upload** is handled by the grace window and the
 read-rows-first ordering above, not by locking.
 
-**The one race that is not handled is the storage quota**, and it is a genuine
-read-then-write. See §10.
+**The storage quota is one transaction, serialised per user.**
+`createWithinQuota` takes `pg_advisory_xact_lock(hashtextextended(userId, 0))`,
+sums, decides and inserts (`lib/prismaMediaIndex.ts`). It used to be a genuine
+read-then-write — `usedBytes()`, `checkQuota`, a disk write, then `create()` —
+which admitted 240 bytes against a 100-byte quota in a four-way reproduction.
+The lock is transaction-scoped, so it releases on commit or rollback, and it is
+per user, so different users never contend. See §10.1 for why a plain
+transaction, a conditional INSERT and a `CHECK` constraint all fail to hold this
+one.
 
 The rate limiter is in-process by design (`lib/rateLimit.ts:1-9`): a `Map` of
 fixed windows, pruned when it exceeds 1000 keys (`lib/rateLimit.ts:44-46`).
@@ -523,8 +531,10 @@ libvips timeout (`lib/imagePipeline.ts:29`).
 - **Nothing in the app runs the reaper.** `npm run reap` has to be put in cron by
   hand. A deployment that never runs it accumulates orphan files silently.
 - **There is no admin identity.** No endpoint can act on another user's data,
-  which is why the reaper is a script — and why a stranded `Video` row has no
-  in-app remedy (§10).
+  which is why both maintenance jobs are scripts rather than routes: `npm run
+  reap` for the image store, and `npm run forget-video` for a stranded `Video`
+  row (§10.2). Both inherit the shell's authority, which is the only
+  administrator identity this app has.
 - **In-process state that does not replicate:** the rate-limit windows
   (`lib/rateLimit.ts:32`), the Prisma client on `globalThis`
   (`lib/prisma.ts:11-16`), and the Cloudinary SDK's global config, which is why
@@ -552,11 +562,11 @@ libvips timeout (`lib/imagePipeline.ts:29`).
 
 ---
 
-## 10. Defects found while writing this document
+## 10. Defects found while writing this document — and fixed
 
-### 10.1 The storage quota is a read-then-write race
+### 10.1 The storage quota was a read-then-write race — FIXED
 
-`lib/handlers/images.ts` reads the used bytes and then writes, with nothing in
+`POST /api/image-upload` read the quota, decided, and wrote, with nothing in
 between that would serialise two callers:
 
 ```
@@ -566,70 +576,96 @@ between that would serialise two callers:
 136   record = await index.create({ ... bytes: normalised.bytes ... });
 ```
 
-Two uploads that arrive together both compute `usedBytes` from the same
-snapshot, both pass `checkQuota` (`lib/quota.ts:62`), and both then insert. There
-is no transaction around the pair, no `SELECT … FOR UPDATE`, and no `CHECK`
-constraint on the table that could refuse the second write — `Image` has no
-constraint on the per-user sum at all
-(`prisma/migrations/20260820120000_image_index/migration.sql`).
+Two uploads that arrived together both computed `usedBytes` from the same
+snapshot, both passed `checkQuota`, and both then inserted. There was no
+transaction around the pair, no `SELECT … FOR UPDATE`, and no `CHECK` constraint
+that could refuse the second write. And the window is not narrow: line 132 is a
+disk write, sitting between the decision and the row.
 
-The overshoot is bounded by the upload limiter, not by the quota: 10 uploads per
-minute per user (`lib/rateLimiters.ts:10`) at up to 10 MB each
-(`lib/uploadValidation.ts:22`) means a user sitting on the quota boundary can
-exceed it by roughly 100 MB per minute *per process* — and because the limiter
-is in-process (§7), a second instance doubles that. On a 100 MB default quota
-that is a 2× overshoot per minute of sustained parallel uploading.
+The overshoot was bounded by the upload limiter, not by the quota: 10 uploads
+per minute per user at up to 10 MB each means a user sitting on the boundary
+could exceed it by roughly 100 MB per minute *per process* — and because the
+limiter is in-process (§7), a second instance doubles that. On the 100 MB
+default that is a 2× overshoot per minute of sustained parallel uploading.
 
-This is the one place in the repo where a decision that could be a single
-statement is not. Both sibling patterns already exist in the codebase: the
-delete path pushes ownership into the `deleteMany` predicate
-(`lib/prismaMediaIndex.ts:31-34`), and the reaper refuses rather than guessing on
-an untrustworthy read. The natural fixes here are a database-side one — a
-`user_storage` row updated with `UPDATE … WHERE used + ? <= quota` and the row
-count as the answer — or a per-user in-process mutex, which would inherit the
-single-instance limitation the rest of the app already has.
+**Reproduced** against PostgreSQL: four concurrent uploads of 60 bytes against a
+100-byte quota, with the handler's own disk write between the check and the
+insert. All four were admitted; 240 bytes were stored.
 
-It is not mentioned in DECISIONS.md or the README, so it reads as an oversight
-rather than an accepted trade.
+**Fixed** with `ImageIndex.createWithinQuota` — the sum, the decision and the
+insert in one transaction, serialised per user by `pg_advisory_xact_lock` on the
+user id (`lib/prismaMediaIndex.ts`).
 
-### 10.2 The README contradicts the code about video deletes
+The lock is the part that does the work, and it is worth saying why the two
+cheaper answers do not:
 
-README "Media lifecycle" (`README.md`, the table under that heading) says the
-residue of a failed video delete is:
+| candidate | why it does not hold |
+| --- | --- |
+| a transaction around the read and the write | under READ COMMITTED both callers evaluate `SUM(bytes)` against their own snapshot, and Postgres cannot lock rows that do not exist yet — the second has nothing to block on |
+| `INSERT … SELECT … WHERE (SELECT SUM(bytes) …) + ? <= quota` | same reason: the subquery is evaluated per snapshot |
+| a `CHECK` constraint on the table | the quota is per user and configurable at runtime (`IMAGE_STORAGE_QUOTA_BYTES`); a table constraint cannot see either |
+| a `user_storage` row with `UPDATE … WHERE used + ? <= quota` | this does work — the row lock serialises it — at the cost of a second source of truth for a number the `Image` rows already hold, and a reconciliation job to keep them agreeing |
+| a per-user in-process mutex | inherits the single-instance limitation the rest of the app has (§7), and this is the one limit where a second instance doubling the overshoot is the whole problem |
+
+The advisory lock is transaction-scoped, so it releases on commit or rollback
+and cannot leak, and it is derived from the user id, so two uploads by different
+users never contend.
+
+The cheap pre-check stays, demoted in the comments to what it always was: an
+optimisation that turns the common "already full" case into a 507 without
+writing a file that would only be unlinked again. A refusal from the atomic
+insert unlinks the file it just wrote, which is the same compensating unlink the
+index-failure path already performed.
+
+Covered by three handler cases driving the real handler concurrently, and by
+`tests/prismaQuota.test.ts` against a real PostgreSQL — eight concurrent
+60-byte inserts against a 300-byte quota admit exactly five, and two different
+users do not serialise each other.
+
+### 10.2 The README contradicted the code about video deletes — FIXED, and the owner action now exists
+
+README "Media lifecycle" said the residue of a failed video delete was:
 
 > a row pointing at an asset that has gone — visible, and **fixed by pressing
 > delete again**
 
-The code does the opposite, deliberately and recently. `destroyVideo` now asks
-both delivery types, and if both answer `"not found"` the handler **keeps the
-row and returns 502**:
+The code does the opposite, deliberately and recently. `destroyVideo` asks both
+delivery types, and if both answer `"not found"` the handler **keeps the row and
+returns 502** (`lib/handlers/videos.ts:276-287`) — because that string is not
+proof of absence: a destroy against the wrong cloud answers it for every id.
+DECISIONS.md already agreed with the code. The README paragraph was a leftover
+from before the change and told a reader the exact opposite of what happens.
 
-```
-276   if (remoteResult === "not found") {
-...     "The video was not deleted. Cloudinary did not confirm the asset
-        was removed, so the record has been kept ..."
-285     { status: 502 }
-```
+The second half of the problem was worse, because it was not a stale sentence
+but a missing mechanism: **there was no owner action**. No endpoint, script or
+npm task removed a `Video` row without a successful Cloudinary destroy;
+`scripts/reap-orphans.ts` reconciles the image store only, and `VideoIndex` had
+no un-scoped delete on it at all. "An owner action" meant direct SQL.
 
-(`lib/handlers/videos.ts:276-287`.) DECISIONS.md agrees with the code —
-*"That one used to self-heal … It no longer does"* — and says a stranded row is
-now "an owner action". So the README paragraph is a leftover from before that
-change, and it tells a reader the exact opposite of what will happen.
+**Fixed** both ways. The README table now points at the mechanism, and the
+mechanism exists: `lib/forgetVideo.ts` and
+`npm run forget-video -- <videoId> <publicId>`. It reports by default and needs
+`--delete` to act, and the `publicId` must match the row's own — which the
+operator can only produce by reading the row and looking the asset up in the
+Cloudinary console. That is the check, not a convenience: this is the one
+operation in the app that throws away the last handle on a remote asset, and
+being wrong about it means an asset that is invisible and billed for ever.
 
-Worth fixing together with the second half of the problem: **there is no owner
-action**. No endpoint, script or npm task removes a `Video` row without a
-successful Cloudinary destroy — `scripts/reap-orphans.ts` reconciles the image
-store only, and `VideoIndex` has no un-scoped delete on it at all
-(`lib/mediaIndex.ts:62-75`). "An owner action" currently means direct SQL. That
-is a defensible answer for a project this size, but it should be written down as
-that rather than as a mechanism that exists.
+It is a script rather than a route for the same reason `npm run reap` is:
+deleting another account's row needs an administrator identity and this app has
+none, so it inherits the shell's. `VideoIndex` gains `findAny` and `deleteById`,
+marked un-scoped and script-only in the same way `ImageIndex.listAll` and
+`deleteByIds` already are.
 
-### 10.3 The README's image flowchart is missing the step that matters
+### 10.3 The README's image flowchart was missing the step that matters — FIXED
 
-The `mermaid` flowchart under "The image path, end to end" goes
+The `mermaid` flowchart under "The image path, end to end" went
 `validateUpload → normaliseUpload` with no node for `sniffImageFormat`, which
 sits between them at `lib/handlers/images.ts:86` and is the step the rest of the
 README and DECISIONS.md both describe as the actual security boundary. A reader
 following the diagram would conclude that decoding is what proves the file is an
-image — which is precisely the belief `lib/imageSniff.ts:1-22` was written to
-correct. The sequence diagram in §2 above shows the real order.
+image — precisely the belief `lib/imageSniff.ts:1-22` was written to correct.
+
+The node is in the diagram now, with its 415, and the quota nodes were corrected
+at the same time: the pre-check is labelled as an optimisation and the atomic
+insert appears as the step that can also answer 507.

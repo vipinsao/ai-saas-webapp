@@ -104,6 +104,17 @@ gone is now an owner action. A stranded row is visible and costs nothing; a
 stranded asset is invisible and is billed for ever, so the residue is kept on
 the side that can be seen.
 
+For a while "an owner action" named nothing: no endpoint, no script and no npm
+task could remove a `Video` row without a successful destroy, and `VideoIndex`
+had no un-scoped delete on it at all, so the phrase meant direct SQL. It means
+`npm run forget-video -- <videoId> <publicId>` now (`lib/forgetVideo.ts`). It
+reports by default and needs `--delete` to act, and the `publicId` has to match
+the row's own — which cannot be produced without reading the row and looking the
+asset up in the Cloudinary console. That is the check, not a convenience: this
+is the one operation in the app that throws away the last handle on a remote
+asset, and being wrong about it produces exactly the invisible, billed-for-ever
+asset the whole delete order exists to avoid.
+
 The rule underneath both: **delete last the thing that lets you find the
 others.** The filesystem is enumerable, so an image row is expendable. A remote
 asset is not enumerable from here, so its row is not.
@@ -158,6 +169,34 @@ rather than against the uploaded size. Checking the uploaded size would be
 cheaper but would reject files that would have fitted, because WebP is usually a
 good deal smaller than the original. The wasted work is bounded by the 10 MB
 per-file cap and the rate limiter.
+
+### The check and the insert are one statement, because a quota that can be raced is not a quota
+
+The check used to be `usedBytes()` → `checkQuota` → `saveImage` → `create()`,
+with no transaction, no lock, and no constraint that could refuse the second
+write. Parallel uploads read the same snapshot and all passed, and the window
+between the decision and the insert is not narrow — it is a disk write. Four
+concurrent 60-byte uploads against a 100-byte quota stored 240 bytes. The
+overshoot was bounded by the rate limiter, 10 uploads a minute at up to 10 MB
+each per process, rather than by the quota: about 2× the 100 MB default per
+minute, doubling again per extra instance.
+
+`ImageIndex.createWithinQuota` sums, decides and inserts inside one transaction,
+serialised per user by `pg_advisory_xact_lock` on the user id. The lock is the
+part that matters, and the cheaper answers were considered and do not hold: a
+plain transaction does not, because under READ COMMITTED both callers evaluate
+`SUM(bytes)` against their own snapshot and Postgres cannot lock rows that do
+not exist yet; a conditional `INSERT … WHERE (SELECT SUM …)` fails for the same
+reason; and a `CHECK` constraint cannot see a per-user limit that is configured
+at runtime. A `user_storage` counter row with `UPDATE … WHERE used + ? <= quota`
+would work, at the price of a second source of truth for a number the `Image`
+rows already hold and a job to keep the two agreeing.
+
+The pre-flight `checkQuota` is still there and is now labelled as what it always
+was: an optimisation that answers the common "already full" case without writing
+a file that would only be unlinked again. It is not the guarantee. When the
+atomic insert refuses, the file just written is unlinked — the same compensating
+unlink the index-failure path performs, for the same reason.
 
 The quota counts the local image store only. Video bytes live in Cloudinary and
 are governed by that account's plan, which this app cannot read from a request

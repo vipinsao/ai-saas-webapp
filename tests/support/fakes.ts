@@ -155,6 +155,17 @@ export function createFakeVideoIndex(seed: VideoRecord[] = []): FakeVideoIndex {
       rows.splice(at, 1);
       return 1;
     },
+
+    async findAny(id) {
+      return rows.find((row) => row.id === id) ?? null;
+    },
+
+    async deleteById(id) {
+      const at = rows.findIndex((row) => row.id === id);
+      if (at === -1) return 0;
+      rows.splice(at, 1);
+      return 1;
+    },
   };
 
   return index;

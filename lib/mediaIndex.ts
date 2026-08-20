@@ -95,4 +95,13 @@ export interface VideoIndex {
   findOwned(userId: string, id: string): Promise<VideoRecord | null>;
   listOwned(userId: string): Promise<VideoRecord[]>;
   deleteOwned(userId: string, id: string): Promise<number>;
+
+  // --- used by the forget-video maintenance script only, deliberately not
+  //     owner-scoped -----------------------------------------------------------
+  /**
+   * A row by id alone, whoever owns it. The script that uses this runs with the
+   * shell's authority, which is the only administrator identity this app has.
+   */
+  findAny(id: string): Promise<VideoRecord | null>;
+  deleteById(id: string): Promise<number>;
 }

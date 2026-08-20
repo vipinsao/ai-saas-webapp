@@ -105,4 +105,13 @@ export const prismaVideoIndex: VideoIndex = {
     const { count } = await prisma.video.deleteMany({ where: { id, userId } });
     return count;
   },
+
+  findAny(id) {
+    return prisma.video.findUnique({ where: { id } });
+  },
+
+  async deleteById(id) {
+    const { count } = await prisma.video.deleteMany({ where: { id } });
+    return count;
+  },
 };

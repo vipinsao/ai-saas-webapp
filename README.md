@@ -64,13 +64,16 @@ flowchart TD
     D -->|"over limit"| Z2["429 plus Retry-After"]
     D --> E["validateUpload - MIME allowlist, 10 MB cap"]
     E -->|"reject"| Z3["415 wrong type / 413 too large / 400 empty"]
-    E --> F["sharp normaliseUpload - decode, auto-rotate, strip EXIF, WebP"]
+    E --> S["sniffImageFormat - BINARY SIGNATURE, before any decoder"]
+    S -->|"bytes match no supported format"| Z7["415 not a supported image"]
+    S --> F["sharp normaliseUpload - decode, auto-rotate, strip EXIF, WebP"]
     F -->|"undecodable bytes"| Z4["400 not an image"]
-    F --> Q["quota check - used bytes plus this file vs the per-user cap"]
-    Q -->|"over quota"| Z5["507 Insufficient Storage"]
+    F --> Q["quota pre-check - an optimisation, not the guarantee"]
+    Q -->|"already over quota"| Z5["507 Insufficient Storage"]
     Q --> G["imageStore.saveImage - storage/uploads/USER_ID/IMAGE_ID.webp"]
-    G --> R["Image row inserted - file first, row second"]
+    G --> R["index.createWithinQuota - sum, decide and insert in ONE transaction"]
     R -->|"insert fails"| Z6["file unlinked again, 500"]
+    R -->|"no longer fits"| Z8["file unlinked again, 507"]
     R --> H["200 with id, width, height, bytes"]
 
     H --> I["Page requests /api/images/IMAGE_ID?format=..."]
@@ -221,11 +224,21 @@ are opposites. The reasoning is in DECISIONS.md; the short version:
 | | write | delete | residue after a crash in between |
 | --- | --- | --- | --- |
 | image (local disk) | file, then row | **row, then file** | a file with no row — invisible, and findable again by scanning the directory |
-| video (Cloudinary) | asset, then row | **asset, then row** | a row pointing at an asset that has gone — visible, and fixed by pressing delete again |
+| video (Cloudinary) | asset, then row | **asset, then row** | a row pointing at an asset that has gone — visible, and cleared with `npm run forget-video` |
 
 The rule behind both: whatever lets you *find* the other half is deleted last.
 The filesystem can be walked, so an image row is expendable; a Cloudinary asset
 can only be named by the `publicId` in its row, so that row is not.
+
+Pressing delete again does **not** clear that row, and used to: `destroy`
+answers `{ result: "not found" }` for an asset that is already gone *and* for
+every asset in a cloud the credentials do not belong to, so the delete route
+stopped treating that string as proof and now keeps the row and returns 502.
+Clearing a row whose asset really has gone is therefore an owner action, and
+`npm run forget-video -- <videoId> <publicId>` is that action — it reports by
+default and needs `--delete` to act, and the `publicId` has to match the row's
+own, so the operator has to look the asset up in the Cloudinary console before
+the command will do anything.
 
 `npm run reap` reconciles the image store with the `Image` table in both
 directions — files with no row, and rows with no file. Files younger than 15
