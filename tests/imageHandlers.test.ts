@@ -204,6 +204,29 @@ describe("DELETE /api/images/:id", () => {
     assert.equal(await readImage("user_a", id, root), null);
   });
 
+  it("deletes the row before the file, not after", async () => {
+    // The ordering is the whole crash-consistency argument, so it is pinned
+    // here rather than left to a comment: at the moment the row is removed the
+    // file must still be on disk. Swap the two statements in the handler and
+    // this fails.
+    const id = newImageId();
+    await saveImage("user_a", id, Buffer.from("bytes"), root);
+    const index = createFakeImageIndex([imageRecord({ id, userId: "user_a" })]);
+
+    let fileStillPresentWhenRowWent: boolean | null = null;
+    const inner = index.deleteOwned.bind(index);
+    index.deleteOwned = async (userId, imageId) => {
+      fileStillPresentWhenRowWent = (await readImage("user_a", id, root)) !== null;
+      return inner(userId, imageId);
+    };
+
+    const { remove } = handler("user_a", index);
+    await remove(deleteRequest(), context(id));
+
+    assert.equal(fileStillPresentWhenRowWent, true);
+    assert.equal(await readImage("user_a", id, root), null, "and the file goes after");
+  });
+
   it("still succeeds when the row is there but the file has already gone", async () => {
     // The reaper may have collected it, or a previous delete may have crashed
     // between the two statements. Either way the end state is what was asked

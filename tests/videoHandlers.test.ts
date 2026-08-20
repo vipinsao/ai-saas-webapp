@@ -358,12 +358,26 @@ describe("DELETE /api/videos/:id", () => {
     return new NextRequest("http://localhost/api/videos/vid_1", { method: "DELETE" });
   }
 
-  it("destroys the remote asset and then removes the row", async () => {
+  it("destroys the remote asset and then removes the row, in that order", async () => {
+    // Reversed, a crash in between would strand the asset in Cloudinary with
+    // nothing left able to name it. The order is asserted, not assumed.
     const { index, handler } = remove("user_a");
+    const order: string[] = [];
+    const innerDestroy = cloudinary.destroyVideo.bind(cloudinary);
+    cloudinary.destroyVideo = async (publicId) => {
+      order.push("destroy");
+      return innerDestroy(publicId);
+    };
+    const innerDelete = index.deleteOwned.bind(index);
+    index.deleteOwned = async (userId, id) => {
+      order.push("row");
+      return innerDelete(userId, id);
+    };
 
     const response = await handler(request(), context("vid_1"));
 
     assert.equal(response.status, 200);
+    assert.deepEqual(order, ["destroy", "row"]);
     assert.deepEqual(cloudinary.destroyed, ["video-uploads/abc"]);
     assert.equal(index.rows.length, 0);
   });
