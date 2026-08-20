@@ -111,10 +111,18 @@ export function createImageUploadHandler(deps: ImageHandlerDeps) {
     // because the encoded size is what actually lands on disk. Checking the
     // uploaded size first would be cheaper but would reject files that would
     // have fitted -- WebP is usually a good deal smaller than the original.
+    //
+    // This first check is an optimisation and nothing more: it turns the common
+    // "already full" case into a 507 without writing a file that is only going
+    // to be unlinked again. It is NOT the guarantee. It reads a number and then
+    // acts on it after a disk write, and parallel uploads all read the same
+    // number -- which is exactly how a 100 MB quota admitted 240 MB in the
+    // reproduction. The guarantee is index.createWithinQuota below.
+    const quotaBytes = deps.quotaBytes ?? storageQuotaBytes();
     const quota = checkQuota({
       usedBytes: await index.usedBytes(userId),
       incomingBytes: normalised.bytes,
-      quotaBytes: deps.quotaBytes ?? storageQuotaBytes(),
+      quotaBytes,
     });
     if (!quota.ok) {
       return NextResponse.json(
@@ -131,16 +139,23 @@ export function createImageUploadHandler(deps: ImageHandlerDeps) {
     const id = newImageId();
     await saveImage(userId, id, normalised.buffer, root);
 
-    let record: ImageRecord;
+    // The decision and the row, indivisibly. A refusal here means somebody
+    // else's upload landed between the check above and this line, so the file
+    // just written has to go back -- the same compensating unlink the index
+    // failure below performs, for the same reason.
+    let inserted;
     try {
-      record = await index.create({
-        id,
-        userId,
-        bytes: normalised.bytes,
-        originalBytes,
-        width: normalised.width,
-        height: normalised.height,
-      });
+      inserted = await index.createWithinQuota(
+        {
+          id,
+          userId,
+          bytes: normalised.bytes,
+          originalBytes,
+          width: normalised.width,
+          height: normalised.height,
+        },
+        quotaBytes
+      );
     } catch (error) {
       // The row is what makes the file reachable, so a file with no row is
       // dead weight. Undo it here rather than waiting for the reaper; if this
@@ -149,6 +164,31 @@ export function createImageUploadHandler(deps: ImageHandlerDeps) {
       console.error("Image index write failed", error);
       return NextResponse.json({ error: "Could not record the upload" }, { status: 500 });
     }
+
+    if (!inserted.ok) {
+      await deleteImage(userId, id, root).catch(() => undefined);
+      const refused = checkQuota({
+        usedBytes: inserted.usedBytes,
+        incomingBytes: normalised.bytes,
+        quotaBytes,
+      });
+      // checkQuota only reports ok:false for a state that does not fit, and
+      // createWithinQuota refused precisely because it does not fit, so this
+      // branch is unreachable; the fallback keeps the response shape honest
+      // rather than asserting.
+      const error = refused.ok ? "Storage quota exceeded" : refused.error;
+      return NextResponse.json(
+        {
+          error,
+          usedBytes: inserted.usedBytes,
+          quotaBytes,
+          remainingBytes: Math.max(0, quotaBytes - inserted.usedBytes),
+        },
+        { status: 507 }
+      );
+    }
+
+    const record: ImageRecord = inserted.record;
 
     return NextResponse.json(publicShape(record));
   };

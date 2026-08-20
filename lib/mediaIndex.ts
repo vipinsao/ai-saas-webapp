@@ -21,8 +21,31 @@ export interface ImageRecord {
   createdAt: Date;
 }
 
+/** What `createWithinQuota` did, and the quota position it did it against. */
+export type QuotaInsert =
+  | { ok: true; record: ImageRecord; usedBytes: number }
+  | { ok: false; usedBytes: number };
+
 export interface ImageIndex {
   create(row: Omit<ImageRecord, "createdAt">): Promise<ImageRecord>;
+  /**
+   * Insert the row only if this user's stored bytes plus `row.bytes` stay
+   * within `quotaBytes` — as one indivisible decision, not a read followed by a
+   * write.
+   *
+   * The quota used to be enforced by `usedBytes()` → `checkQuota` → `create()`
+   * with nothing holding the answer still in between. Parallel uploads read the
+   * same snapshot, all passed, and all wrote. The overshoot was bounded by the
+   * rate limiter — 10 uploads a minute at up to 10 MB each — rather than by the
+   * quota, so roughly 2x the 100 MB default could land in a minute, per process.
+   *
+   * `usedBytes` in the result is the position AFTER a successful insert, and the
+   * position that refused it otherwise. Both are what the caller reports.
+   */
+  createWithinQuota(
+    row: Omit<ImageRecord, "createdAt">,
+    quotaBytes: number
+  ): Promise<QuotaInsert>;
   /** Scoped read. Returns null for another user's id, exactly as for a missing one. */
   findOwned(userId: string, id: string): Promise<ImageRecord | null>;
   listOwned(userId: string): Promise<ImageRecord[]>;

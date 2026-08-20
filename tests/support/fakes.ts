@@ -39,6 +39,27 @@ export function createFakeImageIndex(seed: ImageRecord[] = []): FakeImageIndex {
       return record;
     },
 
+    /**
+     * Atomic by construction: this reads and writes with no `await` in between,
+     * so nothing else can run between the sum and the push. That is the whole
+     * property the real implementation has to buy with an advisory lock.
+     */
+    async createWithinQuota(row, quotaBytes) {
+      if (index.failNextCreate) {
+        index.failNextCreate = false;
+        throw new Error("simulated index write failure");
+      }
+      const usedBytes = rows
+        .filter((existing) => existing.userId === row.userId)
+        .reduce((total, existing) => total + existing.bytes, 0);
+
+      if (usedBytes + row.bytes > quotaBytes) return { ok: false as const, usedBytes };
+
+      const record: ImageRecord = { ...row, createdAt: new Date() };
+      rows.push(record);
+      return { ok: true as const, record, usedBytes: usedBytes + row.bytes };
+    },
+
     async findOwned(userId, id) {
       return rows.find((row) => row.id === id && row.userId === userId) ?? null;
     },

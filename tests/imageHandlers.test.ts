@@ -206,6 +206,102 @@ describe("per-user storage quota", () => {
     assert.equal(response.status, 200);
   });
 
+  // ---------------------------------------------------------------------------
+  // The quota used to be a read-then-write race.
+  //
+  // usedBytes() -> checkQuota -> saveImage -> index.create, with nothing holding
+  // the answer still in between and no constraint that could refuse the second
+  // write. Parallel uploads read the same snapshot and all passed. The overshoot
+  // was bounded by the rate limiter -- 10 uploads a minute at up to 10 MB each,
+  // per process -- not by the quota, so roughly 2x the 100 MB default could land
+  // in a minute.
+  //
+  // These fire the real handler concurrently. The window is not simulated: it is
+  // saveImage's disk write, which yields between the check and the insert.
+  // ---------------------------------------------------------------------------
+
+  it("four simultaneous uploads cannot between them exceed the quota", async () => {
+    const index = createFakeImageIndex();
+    const upload = createImageUploadHandler({
+      auth: signedInAs("user_a"),
+      index,
+      root,
+      // The fixture encodes to 7,762 bytes, so this is room for exactly one of
+      // them: the second upload to reach the insert must be refused.
+      quotaBytes: 10_000,
+      limiter: permissiveLimiter(),
+    });
+
+    const responses = await Promise.all([
+      upload(uploadRequest(fixture)),
+      upload(uploadRequest(fixture)),
+      upload(uploadRequest(fixture)),
+      upload(uploadRequest(fixture)),
+    ]);
+
+    const stored = responses.filter((response) => response.status === 200);
+    const refused = responses.filter((response) => response.status === 507);
+    assert.equal(stored.length + refused.length, 4, "every upload is answered 200 or 507");
+    assert.equal(stored.length, 1, "only one of four fits");
+
+    const used = await index.usedBytes("user_a");
+    assert.ok(used <= 10_000, `stored ${used} bytes against a 10,000 byte quota`);
+    assert.equal(index.rows.length, 1);
+  });
+
+  it("an upload the quota refuses at the last moment leaves no file behind", async () => {
+    // The refusal now happens after the file has been written, because the file
+    // has to exist before the row that points at it. The compensating unlink is
+    // what keeps that from becoming an orphan the reaper has to find.
+    const index = createFakeImageIndex();
+    const upload = createImageUploadHandler({
+      auth: signedInAs("user_a"),
+      index,
+      root,
+      quotaBytes: 10_000,
+      limiter: permissiveLimiter(),
+    });
+
+    await Promise.all([
+      upload(uploadRequest(fixture)),
+      upload(uploadRequest(fixture)),
+      upload(uploadRequest(fixture)),
+    ]);
+
+    const files = await listStoredImages(root);
+    assert.equal(files.length, 1, "one stored row, one file on disk");
+    assert.equal(files[0].imageId, index.rows[0].id);
+  });
+
+  it("a refusal from the atomic insert still reports the quota position", async () => {
+    const index = createFakeImageIndex([
+      imageRecord({ id: newImageId(), userId: "user_a", bytes: 900 }),
+    ]);
+    // 900 + the fixture's 7,762 encoded bytes is over this quota, so the cheap
+    // pre-check would refuse first and the atomic insert would never be
+    // reached. Blinding the pre-check to the seed row is how this test gets at
+    // the second gate: it stands in for the row another request committed in
+    // between, which is the case the pre-check cannot see either.
+    const blindToTheSeedRow = { ...index, usedBytes: async () => 0 };
+    const upload = createImageUploadHandler({
+      auth: signedInAs("user_a"),
+      index: blindToTheSeedRow,
+      root,
+      quotaBytes: 8000,
+      limiter: permissiveLimiter(),
+    });
+
+    const response = await upload(uploadRequest(fixture));
+
+    assert.equal(response.status, 507);
+    const body = await response.json();
+    assert.match(body.error, /Storage quota exceeded/);
+    assert.equal(body.usedBytes, 900);
+    assert.equal(body.quotaBytes, 8000);
+    assert.equal(body.remainingBytes, 7100);
+    assert.deepEqual(await listStoredImages(root), [], "and the file it wrote is gone");
+  });
+
   it("frees space again once an image is deleted", async () => {
     const index = createFakeImageIndex();
     const deps = { auth: signedInAs("user_a"), index, root, limiter: permissiveLimiter() };
