@@ -32,6 +32,7 @@ export default function SocialShare() {
   const [isUploading, setIsUploading] = useState(false);
   const [isTransforming, setIsTransforming] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [isDownloading, setIsDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const previewUrl = useMemo(
@@ -100,6 +101,48 @@ export default function SocialShare() {
       setIsUploading(false);
       // Let the same file be chosen again after a failure.
       event.target.value = "";
+    }
+  };
+
+  /**
+   * This used to be `<a href={url} download>`.
+   *
+   * The transform route sits behind a rate limiter, and on 429 or 500 it
+   * answers with `{ error }` JSON and no Content-Disposition -- but the
+   * `download` attribute makes the browser save the response anyway. The user
+   * got a file containing {"error":"Too many requests"} and the page showed
+   * nothing at all. Fetching first means a failure reaches the alert banner
+   * and only a real image is ever saved.
+   */
+  const handleDownload = async () => {
+    if (!previewUrl || !selected) return;
+    setError(null);
+    setIsDownloading(true);
+    let objectUrl: string | null = null;
+    try {
+      const response = await fetch(`${previewUrl}&download=1`);
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.error ?? `Download failed (${response.status})`);
+      }
+      const blob = await response.blob();
+      objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = `${selectedFormat}-${selected.id}.webp`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (cause) {
+      console.error(cause);
+      setError(cause instanceof Error ? cause.message : "Download failed");
+    } finally {
+      // Revoking immediately can cancel the download in some browsers, so this
+      // waits a tick; without revoking at all the blob leaks for the lifetime
+      // of the page.
+      const created = objectUrl;
+      if (created) setTimeout(() => URL.revokeObjectURL(created), 10_000);
+      setIsDownloading(false);
     }
   };
 
@@ -247,13 +290,16 @@ export default function SocialShare() {
               </p>
 
               <div className="card-actions justify-end mt-6">
-                <a
+                <button
+                  type="button"
                   className="btn btn-primary"
-                  href={`${previewUrl}&download=1`}
-                  download
+                  disabled={isDownloading}
+                  onClick={handleDownload}
                 >
-                  Download for {SOCIAL_FORMATS[selectedFormat].label}
-                </a>
+                  {isDownloading
+                    ? "Preparing…"
+                    : `Download for ${SOCIAL_FORMATS[selectedFormat].label}`}
+                </button>
               </div>
             </div>
           )}

@@ -52,11 +52,14 @@ export default function AppLayout({
         <header className="w-full bg-base-200">
           <div className="navbar max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="flex-none lg:hidden">
+              {/* An icon-only control needs a name of its own: a screen
+                  reader announced this as just "button". */}
               <label
                 htmlFor="sidebar-drawer"
                 className="btn btn-square btn-ghost drawer-button"
+                aria-label="Open the navigation menu"
               >
-                <MenuIcon />
+                <MenuIcon aria-hidden="true" />
               </label>
             </div>
             <div className="flex-1">
@@ -71,11 +74,21 @@ export default function AppLayout({
                 <>
                   <div className="avatar">
                     <div className="w-8 h-8 rounded-full">
+                      {/* Clerk already serves this avatar at the requested
+                          size from its own CDN. Routing it through next/image
+                          would mean whitelisting Clerk's host and paying for a
+                          second optimisation pass to produce the same 32px
+                          image. */}
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
                         src={user.imageUrl}
-                        alt={
-                          user.username || user.emailAddresses[0].emailAddress
-                        }
+                        width={32}
+                        height={32}
+                        alt=""
+                        // The name is already shown as text beside it, so the
+                        // avatar is decoration; an alt repeating it would make
+                        // a screen reader say the name twice.
+                        aria-hidden="true"
                       />
                     </div>
                   </div>
@@ -85,8 +98,9 @@ export default function AppLayout({
                   <button
                     onClick={handleSignOut}
                     className="btn btn-ghost btn-circle"
+                    aria-label="Sign out"
                   >
-                    <LogOutIcon className="h-6 w-6" />
+                    <LogOutIcon className="h-6 w-6" aria-hidden="true" />
                   </button>
                 </>
               )}
@@ -112,13 +126,17 @@ export default function AppLayout({
                 <Link
                   href={item.href}
                   className={`flex items-center space-x-4 px-4 py-2 rounded-lg ${
+                    // text-white was hardcoded, and daisyUI's dark theme
+                    // makes the primary background light enough that white on
+                    // it measures 3.28:1. text-primary-content is defined
+                    // per-theme and is readable in both.
                     pathname === item.href
-                      ? "bg-primary text-white"
+                      ? "bg-primary text-primary-content"
                       : "hover:bg-base-300"
                   }`}
                   onClick={() => setSidebarOpen(false)}
                 >
-                  <item.icon className="w-6 h-6" />
+                  <item.icon className="w-6 h-6" aria-hidden="true" />
                   <span>{item.label}</span>
                 </Link>
               </li>
@@ -130,7 +148,7 @@ export default function AppLayout({
                 onClick={handleSignOut}
                 className="btn btn-outline btn-error w-full"
               >
-                <LogOutIcon className="mr-2 h-5 w-5" />
+                <LogOutIcon className="mr-2 h-5 w-5" aria-hidden="true" />
                 Sign Out
               </button>
             </div>

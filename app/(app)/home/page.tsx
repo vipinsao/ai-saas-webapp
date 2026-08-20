@@ -29,23 +29,21 @@ function Home() {
     fetchVideos();
   }, [fetchVideos]);
 
-  const handleDownload = useCallback((url: string, title: string) => {
-    const link = document.createElement("a");
-    link.href = url;
-    link.setAttribute("download", `${title}.mp4`);
-    link.setAttribute("target", "_blank");
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  }, []);
-
   const handleDelete = useCallback(async (id: string) => {
+    setError(null);
     try {
-      await axios.delete(`/api/videos/${id}`); // Send DELETE request to backend
-      setVideos((prevVideos) => prevVideos.filter((video) => video.id !== id)); // Remove from frontend
+      await axios.delete(`/api/videos/${id}`);
+      setVideos((previous) => previous.filter((video) => video.id !== id));
     } catch (err) {
       console.error("Failed to delete video:", err);
-      setError("Failed to delete video");
+      // The route refuses to drop the row if the Cloudinary asset could not be
+      // deleted, and says why. Showing "Failed to delete video" instead would
+      // hide the one detail that tells the user whether to retry.
+      const message =
+        axios.isAxiosError(err) && err.response
+          ? err.response.data?.error ?? `Delete failed (${err.response.status})`
+          : "Delete failed. Check your connection and try again.";
+      setError(message);
     }
   }, []);
 
@@ -57,7 +55,9 @@ function Home() {
     <div className="container mx-auto p-4">
       <h1 className="text-2xl font-bold mb-4">Videos</h1>
       {error && (
-        <div className="mb-4 p-2 bg-red-200 text-red-800 rounded">{error}</div>
+        <div role="alert" className="alert alert-error mb-4">
+          <span>{error}</span>
+        </div>
       )}
       {videos.length === 0 ? (
         <div className="text-center text-lg text-gray-500">
@@ -66,12 +66,7 @@ function Home() {
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
           {videos.map((video) => (
-            <VideoCard
-              key={video.id}
-              video={video}
-              onDownload={handleDownload}
-              onDelete={handleDelete}
-            />
+            <VideoCard key={video.id} video={video} onDelete={handleDelete} />
           ))}
         </div>
       )}
