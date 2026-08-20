@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, mkdir, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import {
+  deleteImage,
   isValidImageId,
   isValidOwnerId,
+  listStoredImages,
   newImageId,
   readImage,
   resolveImagePath,
@@ -85,5 +87,107 @@ describe("saveImage / readImage", () => {
       () => readImage("user_a", "../secret" as string, root),
       /Invalid image id/
     );
+  });
+});
+
+describe("deleteImage", () => {
+  it("removes the file and reports that it did", async () => {
+    const id = newImageId();
+    await saveImage("user_a", id, Buffer.from("bytes"), root);
+    assert.equal(await deleteImage("user_a", id, root), true);
+    assert.equal(await readImage("user_a", id, root), null);
+  });
+
+  it("reports false rather than throwing when there is nothing to remove", async () => {
+    // A delete drops the index row first, so a retry -- or a delete of
+    // something the reaper already collected -- legitimately finds no file.
+    assert.equal(await deleteImage("user_a", newImageId(), root), false);
+  });
+
+  it("is idempotent", async () => {
+    const id = newImageId();
+    await saveImage("user_a", id, Buffer.from("bytes"), root);
+    assert.equal(await deleteImage("user_a", id, root), true);
+    assert.equal(await deleteImage("user_a", id, root), false);
+  });
+
+  it("cannot delete another user's file with the same id", async () => {
+    const id = newImageId();
+    await saveImage("user_a", id, Buffer.from("owner a"), root);
+    // The path is built from the caller's own id, so there is nothing there.
+    assert.equal(await deleteImage("user_b", id, root), false);
+    assert.deepEqual(await readImage("user_a", id, root), Buffer.from("owner a"));
+  });
+
+  it("refuses to resolve a traversing id, leaving the target file untouched", async () => {
+    // A traversal on delete is worse than on read: a read leaks a file, a
+    // delete destroys one.
+    const victim = path.join(root, "delete-me-not.txt");
+    await writeFile(victim, "still here");
+    for (const attack of [
+      "../delete-me-not",
+      "../../delete-me-not",
+      "..%2Fdelete-me-not",
+      "/etc/passwd",
+      "\\..\\delete-me-not",
+      `${newImageId()}/../../delete-me-not`,
+      "0".repeat(31),
+    ]) {
+      await assert.rejects(() => deleteImage("user_a", attack, root), /Invalid image id/);
+    }
+    await assert.rejects(
+      () => deleteImage("../../etc", newImageId(), root),
+      /Invalid owner id/
+    );
+    assert.equal(await readFile(victim, "utf8"), "still here");
+  });
+});
+
+describe("listStoredImages", () => {
+  it("returns an empty list for a store that does not exist yet", async () => {
+    assert.deepEqual(await listStoredImages(path.join(root, "no-such-dir")), []);
+  });
+
+  it("reports owner, id, size and mtime for each stored file", async () => {
+    const scanRoot = await mkdtemp(path.join(tmpdir(), "imagescan-"));
+    const id = newImageId();
+    await saveImage("user_a", id, Buffer.from("12345"), scanRoot);
+    const [found] = await listStoredImages(scanRoot);
+    assert.equal(found.ownerId, "user_a");
+    assert.equal(found.imageId, id);
+    assert.equal(found.bytes, 5);
+    assert.ok(found.modifiedAtMs > 0);
+    await rm(scanRoot, { recursive: true, force: true });
+  });
+
+  it("ignores files and directories that are not part of the scheme", async () => {
+    const scanRoot = await mkdtemp(path.join(tmpdir(), "imagescan-"));
+    const id = newImageId();
+    await saveImage("user_a", id, Buffer.from("real"), scanRoot);
+    // Not ours: wrong extension, wrong id shape, and a directory that is not a
+    // valid owner id. The reaper deletes what this returns, so anything it
+    // cannot prove it named must not appear.
+    await writeFile(path.join(scanRoot, "user_a", "notes.txt"), "unrelated");
+    await writeFile(path.join(scanRoot, "user_a", "short.webp"), "unrelated");
+    await mkdir(path.join(scanRoot, "..bad owner"), { recursive: true });
+    await writeFile(path.join(scanRoot, "..bad owner", `${newImageId()}.webp`), "unrelated");
+
+    const found = await listStoredImages(scanRoot);
+    assert.deepEqual(
+      found.map((file) => `${file.ownerId}/${file.imageId}`),
+      [`user_a/${id}`]
+    );
+    await rm(scanRoot, { recursive: true, force: true });
+  });
+
+  it("reads the mtime the reaper's grace window compares against", async () => {
+    const scanRoot = await mkdtemp(path.join(tmpdir(), "imagescan-"));
+    const id = newImageId();
+    await saveImage("user_a", id, Buffer.from("old"), scanRoot);
+    const anHourAgo = new Date(Date.now() - 3600_000);
+    await utimes(path.join(scanRoot, "user_a", `${id}.webp`), anHourAgo, anHourAgo);
+    const [found] = await listStoredImages(scanRoot);
+    assert.ok(Math.abs(found.modifiedAtMs - anHourAgo.getTime()) < 2000);
+    await rm(scanRoot, { recursive: true, force: true });
   });
 });

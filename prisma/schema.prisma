@@ -31,3 +31,25 @@ model Video{
   // Matches the only list query in the app: filter by owner, newest first.
   @@index([userId, createdAt])
 }
+
+/// One row per stored image. The bytes live on disk (lib/imageStore.ts); this
+/// table is the index that makes them findable, deletable and countable.
+/// Without it an upload was write-only: nothing recorded that the file existed,
+/// so no user could ever list or remove one and the directory grew forever.
+model Image {
+  /// Same 32-hex value as the filename, so a row and its file address each
+  /// other without a second lookup: <root>/<userId>/<id>.webp
+  id            String   @id
+  /// Clerk user id of the uploader. Also the storage sub-directory.
+  userId        String
+  /// Size of the stored WebP. This is what the per-user quota counts.
+  bytes         Int
+  /// Size of the file the browser sent, kept only to show the saving.
+  originalBytes Int
+  width         Int
+  height        Int
+  createdAt     DateTime @default(now())
+
+  // Matches the only list query: one owner's images, newest first.
+  @@index([userId, createdAt])
+}

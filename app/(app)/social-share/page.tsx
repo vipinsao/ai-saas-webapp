@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   SOCIAL_FORMATS,
   SOCIAL_FORMAT_IDS,
@@ -8,25 +8,35 @@ import {
 } from "@/lib/socialFormats";
 import { MAX_IMAGE_BYTES, formatBytes, IMAGE_MIME_TYPES } from "@/lib/uploadValidation";
 
-interface UploadedImage {
+interface StoredImage {
   id: string;
   width: number;
   height: number;
   bytes: number;
   originalBytes: number;
+  createdAt: string;
+}
+
+interface Usage {
+  usedBytes: number;
+  quotaBytes: number;
+  remainingBytes: number;
 }
 
 export default function SocialShare() {
-  const [uploaded, setUploaded] = useState<UploadedImage | null>(null);
+  const [images, setImages] = useState<StoredImage[]>([]);
+  const [usage, setUsage] = useState<Usage | null>(null);
+  const [selected, setSelected] = useState<StoredImage | null>(null);
   const [selectedFormat, setSelectedFormat] =
     useState<SocialFormatId>("instagram-square");
   const [isUploading, setIsUploading] = useState(false);
   const [isTransforming, setIsTransforming] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const previewUrl = useMemo(
-    () => (uploaded ? `/api/images/${uploaded.id}?format=${selectedFormat}` : null),
-    [uploaded, selectedFormat]
+    () => (selected ? `/api/images/${selected.id}?format=${selectedFormat}` : null),
+    [selected, selectedFormat]
   );
 
   // Each format change requests a fresh crop from the server, so show the
@@ -34,6 +44,28 @@ export default function SocialShare() {
   useEffect(() => {
     if (previewUrl) setIsTransforming(true);
   }, [previewUrl]);
+
+  /**
+   * Uploads used to be write-only: the id lived in React state and was lost on
+   * reload, so a file could never be found again -- or deleted. This is the
+   * read side of that.
+   */
+  const refresh = useCallback(async () => {
+    try {
+      const response = await fetch("/api/images");
+      if (!response.ok) throw new Error(`Could not load your images (${response.status})`);
+      const body = await response.json();
+      setImages(body.images as StoredImage[]);
+      setUsage(body.usage as Usage);
+    } catch (cause) {
+      console.error(cause);
+      setError(cause instanceof Error ? cause.message : "Could not load your images");
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -52,25 +84,52 @@ export default function SocialShare() {
 
       if (!response.ok) {
         // Every failure path on the route returns { error }, so surface the
-        // specific reason instead of a generic "upload failed".
+        // specific reason -- including the quota one, which tells the user to
+        // delete something rather than to try a smaller file.
         const body = await response.json().catch(() => null);
         throw new Error(body?.error ?? `Upload failed (${response.status})`);
       }
 
-      setUploaded((await response.json()) as UploadedImage);
+      const uploaded = (await response.json()) as StoredImage;
+      setSelected(uploaded);
+      await refresh();
     } catch (cause) {
       console.error(cause);
-      setUploaded(null);
       setError(cause instanceof Error ? cause.message : "Upload failed");
     } finally {
       setIsUploading(false);
+      // Let the same file be chosen again after a failure.
+      event.target.value = "";
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    setError(null);
+    setDeletingId(id);
+    try {
+      const response = await fetch(`/api/images/${id}`, { method: "DELETE" });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.error ?? `Delete failed (${response.status})`);
+      }
+      if (selected?.id === id) setSelected(null);
+      await refresh();
+    } catch (cause) {
+      console.error(cause);
+      setError(cause instanceof Error ? cause.message : "Delete failed");
+    } finally {
+      setDeletingId(null);
     }
   };
 
   const savedPercentage =
-    uploaded && uploaded.originalBytes > 0
-      ? Math.round((1 - uploaded.bytes / uploaded.originalBytes) * 100)
+    selected && selected.originalBytes > 0
+      ? Math.round((1 - selected.bytes / selected.originalBytes) * 100)
       : null;
+
+  const usedPercentage = usage
+    ? Math.min(100, Math.round((usage.usedBytes / usage.quotaBytes) * 100))
+    : 0;
 
   return (
     <div className="container mx-auto p-4 max-w-4xl">
@@ -107,6 +166,23 @@ export default function SocialShare() {
             />
           </div>
 
+          {usage && (
+            <div className="mt-4">
+              <div className="flex justify-between text-sm opacity-70">
+                <span>Storage used</span>
+                <span>
+                  {formatBytes(usage.usedBytes)} of {formatBytes(usage.quotaBytes)}
+                </span>
+              </div>
+              <progress
+                className="progress progress-primary w-full"
+                value={usedPercentage}
+                max={100}
+                aria-label="Storage used"
+              />
+            </div>
+          )}
+
           {isUploading && (
             <div className="mt-4 flex items-center gap-3">
               <span className="loading loading-spinner" />
@@ -114,7 +190,7 @@ export default function SocialShare() {
             </div>
           )}
 
-          {uploaded && previewUrl && (
+          {selected && previewUrl && (
             <div className="mt-6">
               <h2 className="card-title mb-4">Select Social Media Format</h2>
               <div className="form-control">
@@ -163,8 +239,8 @@ export default function SocialShare() {
               </div>
 
               <p className="mt-4 text-sm opacity-70">
-                Stored copy: {uploaded.width}×{uploaded.height},{" "}
-                {formatBytes(uploaded.bytes)}
+                Stored copy: {selected.width}×{selected.height},{" "}
+                {formatBytes(selected.bytes)}
                 {savedPercentage !== null && savedPercentage > 0
                   ? ` (${savedPercentage}% smaller than the original)`
                   : ""}
@@ -180,6 +256,53 @@ export default function SocialShare() {
                 </a>
               </div>
             </div>
+          )}
+        </div>
+      </div>
+
+      <div className="card mt-8">
+        <div className="card-body">
+          <h2 className="card-title mb-4">Your uploads ({images.length})</h2>
+
+          {images.length === 0 ? (
+            <p className="text-sm opacity-70">
+              Nothing stored yet. Uploads stay until you delete them.
+            </p>
+          ) : (
+            <ul className="divide-y divide-base-300">
+              {images.map((image) => (
+                <li
+                  key={image.id}
+                  className="flex flex-wrap items-center justify-between gap-3 py-3"
+                >
+                  <div className="text-sm">
+                    <div className="font-mono">{image.id.slice(0, 12)}…</div>
+                    <div className="opacity-70">
+                      {image.width}×{image.height}, {formatBytes(image.bytes)}, uploaded{" "}
+                      {new Date(image.createdAt).toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => setSelected(image)}
+                      disabled={selected?.id === image.id}
+                    >
+                      {selected?.id === image.id ? "Selected" : "Preview"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-error"
+                      onClick={() => handleDelete(image.id)}
+                      disabled={deletingId === image.id}
+                    >
+                      {deletingId === image.id ? "Deleting…" : "Delete"}
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
           )}
         </div>
       </div>
