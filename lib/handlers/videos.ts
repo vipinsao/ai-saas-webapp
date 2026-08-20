@@ -6,8 +6,9 @@ import {
   type CloudinaryClient,
 } from "../cloudinary";
 import type { EnvLike } from "../env";
-import type { VideoIndex } from "../mediaIndex";
+import type { VideoIndex, VideoRecord } from "../mediaIndex";
 import { tooManyRequests, uploadRateLimiter } from "../rateLimiters";
+import { readLimitedFormData } from "../requestLimits";
 import { VIDEO_UPLOAD_RULES, validateUpload } from "../uploadValidation";
 import type { AuthPort, RateLimiterPort, RouteContext } from "./deps";
 
@@ -36,6 +37,44 @@ export function envCloudinaryProvider(env: EnvLike = process.env): CloudinaryPro
     return { ok: false, status: resolved.status, error: resolved.error, missing: resolved.missing };
   }
   return { ok: true, client: createCloudinaryClient(resolved.config) };
+}
+
+/**
+ * What the browser is given for one video.
+ *
+ * `publicId` is deliberately absent. While the list query was unscoped every
+ * account received every other account's publicId, and because uploads were
+ * public-delivery those ids were, on their own, working download links. The id
+ * is a capability, so it stays on the server and the browser gets three signed
+ * URLs for the videos it actually owns.
+ */
+export interface VideoListItem {
+  id: string;
+  title: string;
+  description: string | null;
+  originalSize: string;
+  compressedSize: string;
+  duration: number;
+  createdAt: Date;
+  thumbnailUrl: string;
+  previewUrl: string;
+  downloadUrl: string;
+}
+
+export function toListItem(video: VideoRecord, urls: CloudinaryClient): VideoListItem {
+  const { thumbnailUrl, previewUrl, downloadUrl } = urls.videoUrls(video.publicId, video.title);
+  return {
+    id: video.id,
+    title: video.title,
+    description: video.description,
+    originalSize: video.originalSize,
+    compressedSize: video.compressedSize,
+    duration: video.duration,
+    createdAt: video.createdAt,
+    thumbnailUrl,
+    previewUrl,
+    downloadUrl,
+  };
 }
 
 export interface VideoHandlerDeps {
@@ -78,12 +117,13 @@ export function createVideoUploadHandler(deps: VideoHandlerDeps) {
     const limit = limiter.check(userId);
     if (!limit.allowed) return tooManyRequests(limit.retryAfterSeconds);
 
-    let formData: FormData;
-    try {
-      formData = await request.formData();
-    } catch {
-      return NextResponse.json({ error: "Malformed upload" }, { status: 400 });
+    // See lib/requestLimits.ts: the body is metered as it arrives rather than
+    // buffered first and measured afterwards.
+    const body = await readLimitedFormData(request, VIDEO_UPLOAD_RULES.maxBytes);
+    if (!body.ok) {
+      return NextResponse.json({ error: body.error }, { status: body.status });
     }
+    const formData = body.formData;
 
     const file = formData.get("file") as File | null;
     // The page checks the size too, but a client-side check is a courtesy, not
@@ -136,7 +176,7 @@ export function createVideoUploadHandler(deps: VideoHandlerDeps) {
         compressedSize: String(uploaded.bytes),
         duration: uploaded.duration ?? 0,
       });
-      return NextResponse.json(video);
+      return NextResponse.json(toListItem(video, provider.client));
     } catch (error) {
       // The row is the only handle on the remote asset, so failing to write it
       // strands a file in Cloudinary that nothing can ever name again. Undo the
@@ -224,5 +264,45 @@ export function createVideoDeleteHandler(deps: VideoHandlerDeps) {
       rowsRemoved: removed,
       remoteResult,
     });
+  };
+}
+
+/**
+ * GET /api/videos -- the caller's videos, each with freshly signed URLs.
+ *
+ * The signing needs the API secret, so an unconfigured server cannot produce a
+ * usable list. It answers 503 naming the missing variables rather than handing
+ * back rows whose every link is broken.
+ */
+export function createVideoListHandler(deps: Omit<VideoHandlerDeps, "index"> & {
+  index: Pick<VideoIndex, "listOwned">;
+}) {
+  const { auth, index, cloudinary } = deps;
+
+  return async function GET(): Promise<NextResponse> {
+    // The middleware already rejects anonymous API calls, but the handler
+    // repeats the check so the route is still safe if the matcher changes.
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const provider = cloudinary();
+    if (!provider.ok) {
+      return NextResponse.json(
+        { error: provider.error, missing: provider.missing },
+        { status: provider.status }
+      );
+    }
+
+    try {
+      // Scoped to the caller. Without this filter every account saw every
+      // other account's uploads.
+      const videos = await index.listOwned(userId);
+      return NextResponse.json(videos.map((video) => toListItem(video, provider.client)));
+    } catch (error) {
+      console.error("Error fetching videos:", error);
+      return NextResponse.json({ error: "Error fetching videos" }, { status: 500 });
+    }
   };
 }
