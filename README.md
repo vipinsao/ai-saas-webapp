@@ -99,7 +99,7 @@ nothing at all.
 ```bash
 npm run dev        # next dev --turbopack
 npm run build      # prisma generate && next build
-npm run lint       # next lint
+npm run lint       # eslint .
 npm run typecheck  # tsc --noEmit
 npm test           # node:test via tsx — 46 tests
 ```
@@ -126,7 +126,7 @@ There are no HTTP-level, database or browser tests.
 
 Everything below is in `package.json`.
 
-- **Next.js 15.1.3** (App Router) with **React 19** and TypeScript 5.7
+- **Next.js 15.5** (App Router) with **React 19** and TypeScript 5.7
 - **Clerk** (`@clerk/nextjs`) for authentication
 - **Prisma 6** with PostgreSQL
 - **sharp 0.35** for local image decoding, cropping and WebP encoding
