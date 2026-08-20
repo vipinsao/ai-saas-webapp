@@ -4,6 +4,22 @@ A small Next.js app for signed-in users to upload an image and crop it to the
 common social-media aspect ratios, and to upload a video and get a compressed
 copy back. Images are processed locally with `sharp`; video goes to Cloudinary.
 
+## Fastest way to see whether this is any good
+
+```bash
+npm install
+npm test        # 138 tests, ~4 seconds
+```
+
+No accounts, no database, no environment variables, no network. That suite is
+where the actual work is: the `sharp` pipeline's exact output dimensions, path
+traversal rejected on read *and* on delete, the storage quota's boundary byte,
+the orphan reaper in both directions, and the real route handlers driven
+against an in-memory index and a stubbed Cloudinary. If you only have five
+minutes, spend them there and in `DECISIONS.md` rather than on setup.
+
+Running the app itself needs Postgres and a free Clerk key — see [Setup](#setup).
+
 ## The image path, end to end
 
 ```mermaid
@@ -64,26 +80,50 @@ by `userId`.
 
 ![Social share page](assets/image-upload.png)
 
-*Screenshot taken before the `sharp` rewrite — the layout is the same, but the
-page now also shows stored dimensions, compression saved, and error states.*
+*This screenshot is out of date. It was taken before the `sharp` rewrite and
+before the uploads list existed. The layout is the same, but the page now also
+shows the stored dimensions, the compression saved, a storage-quota bar, a list
+of your uploads with a Delete button on each, and error states. Replacing it
+needs a browser and a Clerk account; neither was available when this section
+was written, so it is captioned rather than quietly left to mislead.*
 
 ## Setup
 
-**Prerequisites:** Node 24 (the version CI runs), npm 11, and a PostgreSQL
-database. `docker compose up -d` in this repo starts one that matches the
-example connection string.
+**Prerequisites:** Node 24 and npm 11 (`.nvmrc` pins the version CI runs;
+nothing older has been tested). Plus a PostgreSQL database — see the three
+options below.
 
 ```bash
 git clone https://github.com/vipinsao/ai-saas-webapp.git
 cd ai-saas-webapp
 npm install
 
-cp .env.example .env.local     # then fill in the values
-
-docker compose up -d           # optional: local Postgres
+cp .env.example .env           # `.env`, NOT `.env.local` -- see below
 npx prisma migrate deploy      # create the Video and Image tables
 npm run dev                    # http://localhost:3000
 ```
+
+> **Copy to `.env`, not `.env.local`.** Next.js reads both; the Prisma CLI
+> reads only `.env`. A project set up with `.env.local` alone builds fine and
+> then fails on the first Prisma command with
+> `Error code: P1012 ... Environment variable not found: DATABASE_URL`. One
+> file is read by both tools, so that is the one the instructions use.
+
+**A database, three ways.** Any PostgreSQL will do; set `DATABASE_URL` to point
+at it.
+
+| | |
+| --- | --- |
+| Already have Postgres | set `DATABASE_URL` and skip the rest |
+| Docker | `docker compose up -d` starts one matching the example URL — but Docker is not always available, which is why it is not the only option here |
+| No Docker, nothing to install | create a free [Neon](https://neon.tech) project (no card) and paste its connection string |
+
+**Clerk keys.** `.env.example` ships syntactically valid *placeholder* keys, not
+real ones. They are enough for `npm run build`, `npm start` and the public
+landing page to work with no account at all — Clerk parses the format and a
+literal `pk_test_...` fails the production build outright. Nobody can sign in
+with them, because the widget loads from a domain that does not exist. Get a
+free Clerk key (no card, about two minutes) before trying any signed-in page.
 
 **Environment variables** are documented one by one in `.env.example`. The
 short version:

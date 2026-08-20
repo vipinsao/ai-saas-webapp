@@ -237,6 +237,31 @@ res.cloudinary.com and played the video in a tab; `fl_attachment` makes
 Cloudinary send `Content-Disposition: attachment`, which works because the
 decision is made server-side.
 
+## One `.env`, and placeholder Clerk keys that are the right shape
+
+The setup instructions said `cp .env.example .env.local`, and that sequence
+does not work. Next.js reads `.env.local` and `.env`; the Prisma CLI reads only
+`.env`. So the app built, and the very next command in the README --
+`npx prisma migrate deploy` -- failed with
+`P1012 ... Environment variable not found: DATABASE_URL`, for everybody. The
+alternatives were a `dotenv-cli` wrapper around every Prisma script or telling
+people to keep two copies of the same file in sync. Using the one file both
+tools already read is smaller than either.
+
+`.env.example` also shipped `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY="pk_test_..."`,
+which is not a key shape Clerk can parse. Clerk throws on it, and because
+`next build` prerenders pages that mount `ClerkProvider`, the *build* failed --
+not just the requests. It now ships the same syntactically valid placeholder CI
+uses (base64 of `example.clerk.accounts.dev$`), so a fresh clone builds, starts,
+and serves the public landing page with no account anywhere.
+
+What was deliberately not built: a `DISABLE_AUTH=1` bypass. It would let a
+reviewer click through the signed-in pages without a Clerk account, and it is
+a code path whose entire purpose is to switch authentication off. Shipping one
+is how it ends up enabled somewhere it should not be. The placeholder key gets
+a stranger to a working landing page and a green test suite without that risk,
+and a real Clerk key is free and takes two minutes.
+
 ## Rate limiting is in-process, on purpose
 
 `lib/rateLimit.ts` is a fixed-window counter in a `Map`. No Redis, no hosted

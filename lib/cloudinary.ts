@@ -53,7 +53,7 @@ export function resolveCloudinaryConfig(env: EnvLike = process.env): CloudinaryC
       error:
         `Video upload is not configured: ${missing.join(", ")} ` +
         `${missing.length === 1 ? "is" : "are"} missing. ` +
-        `Set ${missing.length === 1 ? "it" : "them"} in .env.local (see .env.example). ` +
+        `Set ${missing.length === 1 ? "it" : "them"} in .env (see .env.example). ` +
         `The image features do not need Cloudinary and keep working without it.`,
     };
   }

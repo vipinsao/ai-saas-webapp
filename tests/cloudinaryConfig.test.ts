@@ -37,7 +37,7 @@ describe("resolveCloudinaryConfig", () => {
       "CLOUDINARY_API_SECRET",
     ]);
     assert.match(result.error, /NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME/);
-    assert.match(result.error, /\.env\.local/);
+    assert.match(result.error, /\.env/);
   });
 
   it("treats a present-but-empty variable as missing", () => {
