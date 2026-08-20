@@ -1,0 +1,27 @@
+# Postgres for local development. The app itself is run with `npm run dev` on
+# the host — see DECISIONS.md for why there is no application image.
+#
+#   docker compose up -d
+#   npx prisma migrate deploy
+#
+# Matches the DATABASE_URL in .env.example.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: cloudinary_saas
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cloudinary_saas"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

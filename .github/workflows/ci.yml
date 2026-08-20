@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # The Prisma client is generated code that lib/prisma.ts imports, so it
+      # has to exist before typecheck. Generation reads the schema only; it
+      # does not connect to a database.
+      - run: npx prisma generate
+
+      - run: npm run lint
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      # next build prerenders pages that mount ClerkProvider, and Clerk throws
+      # at build time when the publishable key is missing. These are throwaway
+      # placeholders in the shape Clerk parses -- no account is involved, and
+      # nothing in the build talks to Clerk, Cloudinary or Postgres.
+      - run: npm run build
+        env:
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_ZXhhbXBsZS5jbGVyay5hY2NvdW50cy5kZXYk
+          CLERK_SECRET_KEY: sk_test_ci_placeholder
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cloudinary_saas
