@@ -12,6 +12,7 @@ import {
   readImage,
   resolveImagePath,
   saveImage,
+  defaultStorageRoot,
 } from "../lib/imageStore";
 
 let root: string;
@@ -189,5 +190,38 @@ describe("listStoredImages", () => {
     const [found] = await listStoredImages(scanRoot);
     assert.ok(Math.abs(found.modifiedAtMs - anHourAgo.getTime()) < 2000);
     await rm(scanRoot, { recursive: true, force: true });
+  });
+});
+
+describe("defaultStorageRoot: a blank IMAGE_STORAGE_DIR is not configuration", () => {
+  const original = process.env.IMAGE_STORAGE_DIR;
+  const fallback = path.join(process.cwd(), "storage", "uploads");
+
+  after(() => {
+    if (original === undefined) delete process.env.IMAGE_STORAGE_DIR;
+    else process.env.IMAGE_STORAGE_DIR = original;
+  });
+
+  it("falls back to ./storage/uploads when unset", () => {
+    delete process.env.IMAGE_STORAGE_DIR;
+    assert.equal(defaultStorageRoot(), fallback);
+  });
+
+  it("falls back when the value is the empty string .env.example ships", () => {
+    // `cp .env.example .env` yields IMAGE_STORAGE_DIR="". Read with `??` that
+    // resolved to "", so uploads landed in the process working directory and
+    // the reaper refused every sweep. Blank means "use the default".
+    process.env.IMAGE_STORAGE_DIR = "";
+    assert.equal(defaultStorageRoot(), fallback);
+  });
+
+  it("falls back when the value is only whitespace", () => {
+    process.env.IMAGE_STORAGE_DIR = "   ";
+    assert.equal(defaultStorageRoot(), fallback);
+  });
+
+  it("still honours a real directory", () => {
+    process.env.IMAGE_STORAGE_DIR = "/var/data/images";
+    assert.equal(defaultStorageRoot(), "/var/data/images");
   });
 });

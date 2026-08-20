@@ -18,7 +18,13 @@ const FILE_EXTENSION = ".webp";
 const OWNER_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 export function defaultStorageRoot(): string {
-  return process.env.IMAGE_STORAGE_DIR ?? path.join(process.cwd(), "storage", "uploads");
+  // `??` alone is wrong here: `.env.example` ships IMAGE_STORAGE_DIR="" so a
+  // reader can see the name and the default, and dotenv turns that into "".
+  // An empty string is "not configured", not "store at the filesystem root" --
+  // left as `??` it resolved to "", which put uploads in the process's working
+  // directory and made the reaper refuse every sweep.
+  const configured = process.env.IMAGE_STORAGE_DIR?.trim();
+  return configured ? configured : path.join(process.cwd(), "storage", "uploads");
 }
 
 export function newImageId(): string {

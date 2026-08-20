@@ -8,7 +8,7 @@ copy back. Images are processed locally with `sharp`; video goes to Cloudinary.
 
 ```bash
 npm install
-npm test        # 179 tests, ~5 seconds, no keys
+npm test        # 187 tests, ~5 seconds, no keys
 ```
 
 No accounts, no database, no environment variables, no network. That suite is
@@ -173,14 +173,14 @@ npm run dev        # next dev --turbopack
 npm run build      # prisma generate && next build
 npm run lint       # eslint .
 npm run typecheck  # tsc --noEmit
-npm test           # node:test via tsx — 179 tests
+npm test           # node:test via tsx — 187 tests
 npm run reap       # reconcile the image store against the Image table
 npm run reap -- --dry-run   # report what it would delete, delete nothing
 ```
 
 ## Tests
 
-`npm test` runs 179 assertions with no network and no database. Eleven suites:
+`npm test` runs 187 assertions with no network and no database. Eleven suites:
 
 | Suite | What it pins down |
 | --- | --- |
