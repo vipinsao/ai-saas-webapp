@@ -36,7 +36,12 @@ export interface ImageIndex {
   usedBytes(userId: string): Promise<number>;
 
   // --- used by the reaper only, deliberately not owner-scoped ---------------
-  listAll(): Promise<Array<Pick<ImageRecord, "id" | "userId">>>;
+  /**
+   * `createdAt` is here so the reaper can apply the same grace window to rows
+   * that it applies to files. Without it a row written moments ago looks
+   * identical to a row whose file was lost months ago.
+   */
+  listAll(): Promise<Array<Pick<ImageRecord, "id" | "userId" | "createdAt">>>;
   deleteByIds(ids: string[]): Promise<number>;
 }
 
@@ -65,5 +70,6 @@ export interface VideoIndex {
     duration: number;
   }): Promise<VideoRecord>;
   findOwned(userId: string, id: string): Promise<VideoRecord | null>;
+  listOwned(userId: string): Promise<VideoRecord[]>;
   deleteOwned(userId: string, id: string): Promise<number>;
 }

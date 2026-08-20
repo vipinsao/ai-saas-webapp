@@ -63,7 +63,7 @@ export function createFakeImageIndex(seed: ImageRecord[] = []): FakeImageIndex {
     },
 
     async listAll() {
-      return rows.map((row) => ({ id: row.id, userId: row.userId }));
+      return rows.map((row) => ({ id: row.id, userId: row.userId, createdAt: row.createdAt }));
     },
 
     async deleteByIds(ids) {
@@ -120,6 +120,12 @@ export function createFakeVideoIndex(seed: VideoRecord[] = []): FakeVideoIndex {
 
     async findOwned(userId, id) {
       return rows.find((row) => row.id === id && row.userId === userId) ?? null;
+    },
+
+    async listOwned(userId) {
+      return rows
+        .filter((row) => row.userId === userId)
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     },
 
     async deleteOwned(userId, id) {
@@ -179,6 +185,14 @@ export function createFakeCloudinary(
       }
       fake.uploads.push({ bytes: buffer.length, folder: options.folder });
       return fake.nextResult;
+    },
+
+    videoUrls(publicId, title) {
+      return {
+        thumbnailUrl: `https://cdn.test/${publicId}/thumb?sig=fake`,
+        previewUrl: `https://cdn.test/${publicId}/preview?sig=fake`,
+        downloadUrl: `https://cdn.test/${publicId}/download/${title}?sig=fake`,
+      };
     },
 
     async destroyVideo(publicId) {

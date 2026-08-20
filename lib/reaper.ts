@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { deleteImage, listStoredImages, defaultStorageRoot } from "./imageStore";
 import type { ImageIndex } from "./mediaIndex";
 
@@ -20,8 +21,29 @@ import type { ImageIndex } from "./mediaIndex";
  * job collects it. The row->file direction is not something this code can
  * produce; it comes from outside (a restored database dump against a wiped
  * volume, a hand-run `rm`, a container that lost an ephemeral filesystem).
- * It is reaped too, because the alternative is leaving broken entries in a
- * user's list and charging them quota for bytes that no longer exist.
+ *
+ * ---------------------------------------------------------------------------
+ * THE ROW SIDE IS THE DANGEROUS ONE, AND IT IS GUARDED THREE WAYS.
+ *
+ * Deleting an orphan file costs one image. Deleting orphan rows costs the whole
+ * index if the scan comes back empty for a reason that has nothing to do with
+ * the rows -- and "the storage directory is not there" is exactly such a
+ * reason. The default root is `process.cwd()/storage/uploads`; an ephemeral
+ * filesystem, a fresh deploy, an unset IMAGE_STORAGE_DIR or a process started
+ * from the wrong directory all produce ENOENT, `listStoredImages` answers `[]`
+ * because an empty store is not a crash, and every row in the table then looks
+ * like an orphan. The first version of this file did precisely that.
+ *
+ *   1. the root must exist and be a directory, or the sweep refuses to run;
+ *   2. zero files with rows still present is treated as a broken scan, not as
+ *      a table full of orphans -- it refuses rather than guesses;
+ *   3. rows younger than the grace window are skipped, for the same reason
+ *      young files are.
+ *
+ * Rows are also read BEFORE the directory is scanned. An upload writes its file
+ * and then its row, so reading rows first means any row this sweep considers
+ * had its file written before the scan started -- closing the window where an
+ * upload landing mid-sweep would have looked like a row with no file.
  */
 
 export interface OrphanFile {
@@ -45,7 +67,9 @@ export interface ReapReport {
   /** Bytes freed from disk. 0 on a dry run. */
   bytesReclaimed: number;
   /** Files that had no row but were too new to touch -- see graceMs. */
-  skippedTooNew: number;
+  skippedFilesTooNew: number;
+  /** Rows that had no file but were too new to touch. */
+  skippedRowsTooNew: number;
   dryRun: boolean;
 }
 
@@ -71,6 +95,37 @@ function key(ownerId: string, imageId: string): string {
   return `${ownerId}/${imageId}`;
 }
 
+/**
+ * Thrown instead of deleting when the storage scan cannot be trusted. A sweep
+ * that refuses to run is an alert; a sweep that runs on a bad scan is a
+ * restore-from-backup.
+ */
+export class UntrustworthyScanError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UntrustworthyScanError";
+  }
+}
+
+async function assertRootUsable(root: string): Promise<void> {
+  let info;
+  try {
+    info = await stat(root);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    throw new UntrustworthyScanError(
+      `Refusing to reap: the storage root ${root} could not be read (${code}). ` +
+        `Every row in the index would look like an orphan. Check IMAGE_STORAGE_DIR ` +
+        `and the working directory the job runs from.`
+    );
+  }
+  if (!info.isDirectory()) {
+    throw new UntrustworthyScanError(
+      `Refusing to reap: the storage root ${root} is not a directory.`
+    );
+  }
+}
+
 export async function reapOrphans({
   index,
   root = defaultStorageRoot(),
@@ -78,28 +133,49 @@ export async function reapOrphans({
   now = Date.now,
   dryRun = false,
 }: ReapOptions): Promise<ReapReport> {
-  const files = await listStoredImages(root);
+  await assertRootUsable(root);
+
+  // Rows first, then files -- see the note at the top of this file.
   const rows = await index.listAll();
+  const files = await listStoredImages(root);
+
+  if (files.length === 0 && rows.length > 0) {
+    throw new UntrustworthyScanError(
+      `Refusing to reap: the storage root ${root} holds no images but the index ` +
+        `has ${rows.length} row(s). That is a broken or empty mount far more often ` +
+        `than it is ${rows.length} genuinely orphaned row(s), and the cost of ` +
+        `guessing wrong is the whole index. Delete the rows by hand if the loss ` +
+        `is real.`
+    );
+  }
 
   const rowKeys = new Set(rows.map((row) => key(row.userId, row.id)));
   const fileKeys = new Set(files.map((file) => key(file.ownerId, file.imageId)));
 
   const cutoff = now() - graceMs;
   const orphanFiles: OrphanFile[] = [];
-  let skippedTooNew = 0;
+  let skippedFilesTooNew = 0;
 
   for (const file of files) {
     if (rowKeys.has(key(file.ownerId, file.imageId))) continue;
     if (file.modifiedAtMs > cutoff) {
-      skippedTooNew += 1;
+      skippedFilesTooNew += 1;
       continue;
     }
     orphanFiles.push({ ownerId: file.ownerId, imageId: file.imageId, bytes: file.bytes });
   }
 
-  const orphanRows: OrphanRow[] = rows
-    .filter((row) => !fileKeys.has(key(row.userId, row.id)))
-    .map((row) => ({ userId: row.userId, id: row.id }));
+  const orphanRows: OrphanRow[] = [];
+  let skippedRowsTooNew = 0;
+
+  for (const row of rows) {
+    if (fileKeys.has(key(row.userId, row.id))) continue;
+    if (row.createdAt.getTime() > cutoff) {
+      skippedRowsTooNew += 1;
+      continue;
+    }
+    orphanRows.push({ userId: row.userId, id: row.id });
+  }
 
   let bytesReclaimed = 0;
   if (!dryRun) {
@@ -121,7 +197,8 @@ export async function reapOrphans({
     orphanFiles,
     orphanRows,
     bytesReclaimed,
-    skippedTooNew,
+    skippedFilesTooNew,
+    skippedRowsTooNew,
     dryRun,
   };
 }

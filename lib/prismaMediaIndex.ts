@@ -43,7 +43,7 @@ export const prismaImageIndex: ImageIndex = {
   },
 
   listAll() {
-    return prisma.image.findMany({ select: { id: true, userId: true } });
+    return prisma.image.findMany({ select: { id: true, userId: true, createdAt: true } });
   },
 
   async deleteByIds(ids) {
@@ -60,6 +60,13 @@ export const prismaVideoIndex: VideoIndex = {
 
   findOwned(userId, id) {
     return prisma.video.findFirst({ where: { id, userId } });
+  },
+
+  listOwned(userId) {
+    return prisma.video.findMany({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+    });
   },
 
   async deleteOwned(userId, id) {

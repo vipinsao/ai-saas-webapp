@@ -13,7 +13,7 @@
  */
 import { defaultStorageRoot } from "../lib/imageStore";
 import { prismaImageIndex } from "../lib/prismaMediaIndex";
-import { reapOrphans } from "../lib/reaper";
+import { reapOrphans, UntrustworthyScanError } from "../lib/reaper";
 import { prisma } from "../lib/prisma";
 
 function megabytes(bytes: number): string {
@@ -28,7 +28,10 @@ async function main() {
 
   console.log(`store:      ${root}`);
   console.log(`scanned:    ${report.scannedFiles} files, ${report.scannedRows} rows`);
-  console.log(`too new:    ${report.skippedTooNew} file(s) inside the grace window, left alone`);
+  console.log(
+    `too new:    ${report.skippedFilesTooNew} file(s) and ${report.skippedRowsTooNew} row(s) ` +
+      `inside the grace window, left alone`
+  );
   console.log(
     `files with no row: ${report.orphanFiles.length}` +
       (dryRun ? " (not deleted)" : ` deleted, ${megabytes(report.bytesReclaimed)} reclaimed`)
@@ -46,7 +49,10 @@ async function main() {
 
 main()
   .catch((error) => {
-    console.error(error);
+    // UntrustworthyScanError is the guard doing its job, not a crash: say so
+    // in one line rather than burying it in a stack trace.
+    if (error instanceof UntrustworthyScanError) console.error(error.message);
+    else console.error(error);
     // Non-zero so a cron wrapper or CI step notices.
     process.exitCode = 1;
   })
