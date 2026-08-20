@@ -40,3 +40,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+
+# a bare mirror clone of this repo was committed here by mistake
+AI-Saas-Webapp.git/
