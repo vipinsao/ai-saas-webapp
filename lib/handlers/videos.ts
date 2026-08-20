@@ -203,9 +203,11 @@ export function createVideoUploadHandler(deps: VideoHandlerDeps) {
  *
  * The cost of this order is the mirror-image residue: a crash between the two
  * leaves a row pointing at an asset that no longer exists. That is visible (a
- * broken thumbnail) and self-healing -- pressing delete again re-runs destroy,
- * which answers `{ result: "not found" }` for an asset that has already gone,
- * and the row is then removed.
+ * broken thumbnail) and it stays until an owner clears it. It used to clear
+ * itself -- `{ result: "not found" }` was read as "already gone" and the row was
+ * dropped -- but that same string is what Cloudinary answers for an asset that
+ * exists under a delivery type the destroy did not ask about, or in an account
+ * the credentials do not point at, so it could not be trusted to mean absence.
  */
 export function createVideoDeleteHandler(deps: VideoHandlerDeps) {
   const { auth, index, cloudinary } = deps;
@@ -250,6 +252,37 @@ export function createVideoDeleteHandler(deps: VideoHandlerDeps) {
       return NextResponse.json(
         { error: `The video was not deleted. ${failure.error}` },
         { status: failure.status }
+      );
+    }
+
+    // `destroyVideo` has already asked for both delivery types this app has
+    // ever uploaded with, so "not found" here means Cloudinary would not
+    // confirm the asset is gone under either. That is not the same as knowing
+    // it is gone: a destroy against the wrong cloud, or against credentials
+    // belonging to a different account, answers "not found" for every id that
+    // exists. Dropping the row on that answer would delete the only handle on
+    // an asset nothing has confirmed destroyed -- and, once the row is gone,
+    // the app cannot enumerate a Cloudinary folder to find it again.
+    //
+    // So the row stays and the caller is told, with the same status and the
+    // same opening sentence as a destroy that threw, because from the caller's
+    // side it is the same outcome: the video was not deleted, try again.
+    //
+    // The cost is the case this used to self-heal. A crash between the destroy
+    // and the row delete leaves a row whose asset really has gone, and pressing
+    // delete again no longer clears it. That row is now an owner action - see
+    // DECISIONS.md - which is the right way round: a stranded row is visible
+    // and costs nothing, a stranded asset is invisible and is billed for ever.
+    if (remoteResult === "not found") {
+      return NextResponse.json(
+        {
+          error:
+            "The video was not deleted. Cloudinary did not confirm the asset " +
+            "was removed, so the record has been kept - without it nothing can " +
+            "name the asset again.",
+          remoteResult,
+        },
+        { status: 502 }
       );
     }
 

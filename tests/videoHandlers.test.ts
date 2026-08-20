@@ -396,15 +396,37 @@ describe("DELETE /api/videos/:id", () => {
     assert.equal(index.rows.length, 1);
   });
 
-  it("removes the row when Cloudinary says the asset was already gone", async () => {
-    // The self-healing retry after a crash between the two steps.
+  it("keeps the row when Cloudinary will not confirm the asset is gone", async () => {
+    // This used to answer 200 and delete the row, on the reading that "not
+    // found" means "already gone". It does not: the client asks both delivery
+    // types before reporting it, so reaching here means neither confirmed a
+    // removal -- which is also what a destroy against the wrong cloud, or the
+    // wrong account's credentials, answers for every id that exists. The row is
+    // the only handle on the asset, so it is not spent on an unconfirmed
+    // delete.
     const { index, handler } = remove("user_a");
     cloudinary.destroyResult = { result: "not found" };
 
     const response = await handler(request(), context("vid_1"));
 
+    assert.equal(response.status, 502);
+    const body = await response.json();
+    assert.match(body.error, /The video was not deleted/);
+    assert.equal(body.remoteResult, "not found");
+    assert.equal(index.rows.length, 1);
+  });
+
+  it("completes when the retry finds the asset under the legacy type", async () => {
+    // What a pre-authenticated upload looks like from the handler's side: the
+    // client's second attempt succeeds, so the answer that arrives here is
+    // "ok", and the row goes.
+    const { index, handler } = remove("user_a");
+    cloudinary.destroyResult = { result: "ok" };
+
+    const response = await handler(request(), context("vid_1"));
+
     assert.equal(response.status, 200);
-    assert.equal((await response.json()).remoteResult, "not found");
+    assert.equal((await response.json()).remoteResult, "ok");
     assert.equal(index.rows.length, 0);
   });
 
@@ -598,6 +620,89 @@ describe("Cloudinary asset type (regression, H8)", () => {
     } finally {
       (v2.uploader as unknown as { upload_stream: unknown }).upload_stream = original;
     }
+  });
+
+  /**
+   * Stubs `uploader.destroy` and returns whatever the script says for each
+   * call, recording the options each one was given. The retry lives below the
+   * `CloudinaryClient` interface, so the fake client cannot show it -- only the
+   * SDK boundary can.
+   */
+  async function withScriptedDestroy(
+    script: Array<{ result: string }>,
+    run: () => Promise<void>
+  ): Promise<Array<Record<string, unknown>>> {
+    const seen: Array<Record<string, unknown>> = [];
+    const { v2 } = await import("cloudinary");
+    const original = v2.uploader.destroy;
+    (v2.uploader as unknown as { destroy: unknown }).destroy = (async (
+      _publicId: string,
+      options: Record<string, unknown>
+    ) => {
+      seen.push(options);
+      return script[seen.length - 1] ?? { result: "not found" };
+    }) as unknown as typeof original;
+
+    try {
+      await run();
+    } finally {
+      (v2.uploader as unknown as { destroy: unknown }).destroy = original;
+    }
+    return seen;
+  }
+
+  it("retries the legacy upload type when the authenticated destroy finds nothing", async () => {
+    // Every asset uploaded before the switch to authenticated delivery is
+    // stored as `type: "upload"`. Asking only for "authenticated" answers "not
+    // found" for one of those while it sits in the account, public and
+    // fetchable by anyone holding the publicId -- and the handler then deleted
+    // the row, which was the only handle on it.
+    const resolved = envCloudinaryProvider(CONFIGURED);
+    assert.equal(resolved.ok, true);
+    if (!resolved.ok) return;
+
+    let result: string | undefined;
+    const seen = await withScriptedDestroy(
+      [{ result: "not found" }, { result: "ok" }],
+      async () => {
+        result = (await resolved.client.destroyVideo("video-uploads/legacy")).result;
+      }
+    );
+
+    assert.equal(seen.length, 2);
+    assert.deepEqual(seen[0], { resource_type: "video", type: "authenticated" });
+    assert.deepEqual(seen[1], { resource_type: "video", type: "upload" });
+    assert.equal(result, "ok");
+  });
+
+  it("reports not found only when both delivery types report it", async () => {
+    const resolved = envCloudinaryProvider(CONFIGURED);
+    assert.equal(resolved.ok, true);
+    if (!resolved.ok) return;
+
+    let result: string | undefined;
+    const seen = await withScriptedDestroy(
+      [{ result: "not found" }, { result: "not found" }],
+      async () => {
+        result = (await resolved.client.destroyVideo("video-uploads/gone")).result;
+      }
+    );
+
+    assert.equal(seen.length, 2);
+    assert.equal(result, "not found");
+  });
+
+  it("does not ask twice when the authenticated destroy succeeds", async () => {
+    const resolved = envCloudinaryProvider(CONFIGURED);
+    assert.equal(resolved.ok, true);
+    if (!resolved.ok) return;
+
+    const seen = await withScriptedDestroy([{ result: "ok" }], async () => {
+      await resolved.client.destroyVideo("video-uploads/current");
+    });
+
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0], { resource_type: "video", type: "authenticated" });
   });
 
   it("destroys with the same resource_type and type it uploaded with", async () => {

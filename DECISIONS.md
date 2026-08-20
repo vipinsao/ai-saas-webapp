@@ -95,9 +95,14 @@ if the remote delete fails the row is deliberately kept and a 502 is returned
 rather than a success.
 
 The cost is the residue this order produces: a row pointing at an asset that has
-gone, which shows as a broken thumbnail. That one is self-healing — pressing
-delete again re-runs `destroy`, which answers `{ result: "not found" }` for an
-asset that is already gone, and the row is then removed.
+gone, which shows as a broken thumbnail. That one used to self-heal — pressing
+delete again re-ran `destroy`, which answers `{ result: "not found" }` for an
+asset that is already gone, and the row was then removed. It no longer does,
+because that reading of the string was wrong in a way that cost more than the
+residue: see the section on delivery types below. A row whose asset really has
+gone is now an owner action. A stranded row is visible and costs nothing; a
+stranded asset is invisible and is billed for ever, so the residue is kept on
+the side that can be seen.
 
 The rule underneath both: **delete last the thing that lets you find the
 others.** The filesystem is enumerable, so an image row is expendable. A remote
@@ -196,7 +201,10 @@ handlers against a fake client. That establishes:
 - if the row cannot be written, the uploaded asset is destroyed rather than
   leaked;
 - delete destroys the remote asset before the row, keeps the row if that fails,
-  and completes when Cloudinary reports the asset was already gone.
+  and keeps it too when Cloudinary will not confirm the asset was removed;
+- a destroy that reports "not found" for the authenticated type is retried
+  against the legacy `type: "upload"`, and only an answer from both is treated
+  as an answer at all.
 
 It does **not** establish that the real SDK behaves the way the fake does.
 The `type: "authenticated"` change widens this: that uploads are stored as
@@ -364,6 +372,20 @@ response. `destroyVideo` had to learn the same `type`, because a destroy whose
 type does not match the upload answers `{ result: "not found" }` and leaves the
 asset in place — a delete that reports success and deletes nothing, which is the
 exact failure the delete ordering was written to prevent.
+
+**And that fix then broke the assets it was not about.** Hard-coding
+`type: "authenticated"` on destroy made every asset uploaded *before* the change
+— all of which are `type: "upload"` — answer `{ result: "not found" }`. The
+handler read that as "already gone" and deleted the row, which held the only
+copy of the publicId. One request left the asset in the account, still public,
+still fetchable by anyone holding an id that had already been handed to every
+account while the list query was unscoped, and now permanently undeletable.
+
+So `destroyVideo` asks for both delivery types before it reports "not found",
+and the handler no longer treats that string as a success. `"not found"` is an
+answer about one `(resource_type, type)` pair, not about the asset: pointed at
+the wrong cloud, or given another account's credentials, Cloudinary answers it
+for every id that exists. The row is not spent on an unconfirmed delete.
 
 Not fixable: adding `where: { userId }` to the list query stopped new
 disclosure and revoked nothing. While that query was unscoped, every account

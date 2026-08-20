@@ -155,11 +155,28 @@ export function createCloudinaryClient(config: CloudinaryConfig): CloudinaryClie
       // report "not found" for a video that is very much still there -- and a
       // delete that reports success while leaving the asset behind is exactly
       // the bug this handler was written to fix.
-      const result = await cloudinary.uploader.destroy(publicId, {
+      const authenticated = (await cloudinary.uploader.destroy(publicId, {
         resource_type: "video",
         type: "authenticated",
-      });
-      return result as CloudinaryDestroyResult;
+      })) as CloudinaryDestroyResult;
+
+      if (authenticated.result !== "not found") return authenticated;
+
+      // Every asset uploaded BEFORE the switch to authenticated delivery is
+      // stored as `type: "upload"`, and the call above cannot see those: it
+      // answers "not found" for an asset that is sitting in the account, public
+      // and fetchable by anyone holding the publicId. The handler used to take
+      // that string as "already gone" and delete the row, which was the only
+      // handle on it -- so the asset became both public and permanently
+      // undeletable, in one request, for every video predating the change.
+      //
+      // "not found" is therefore not an answer about the asset, it is an answer
+      // about one (resource_type, type) pair. Both pairs this app has ever
+      // uploaded with have to be asked before anything may be concluded.
+      return (await cloudinary.uploader.destroy(publicId, {
+        resource_type: "video",
+        type: "upload",
+      })) as CloudinaryDestroyResult;
     },
 
     videoUrls(publicId, title) {
