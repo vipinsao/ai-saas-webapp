@@ -1,5 +1,6 @@
 /**
- * In-memory stand-ins for the ports in lib/mediaIndex.ts.
+ * In-memory stand-ins for the two ports in lib/mediaIndex.ts and for the
+ * Cloudinary client.
  *
  * They are deliberately dumb: they store rows in an array and filter them the
  * same way the Prisma implementation filters them. What the handler tests prove
@@ -8,7 +9,12 @@
  * lib/prismaMediaIndex.ts, and are listed as unverified in the report.
  */
 import { createRateLimiter } from "../../lib/rateLimit";
-import type { ImageIndex, ImageRecord } from "../../lib/mediaIndex";
+import type {
+  CloudinaryClient,
+  CloudinaryDestroyResult,
+  CloudinaryUploadResult,
+} from "../../lib/cloudinary";
+import type { ImageIndex, ImageRecord, VideoIndex, VideoRecord } from "../../lib/mediaIndex";
 
 export interface FakeImageIndex extends ImageIndex {
   rows: ImageRecord[];
@@ -82,6 +88,111 @@ export function imageRecord(overrides: Partial<ImageRecord> & Pick<ImageRecord, 
     createdAt: new Date("2026-01-01T00:00:00Z"),
     ...overrides,
   };
+}
+
+export interface FakeVideoIndex extends VideoIndex {
+  rows: VideoRecord[];
+  failNextCreate: boolean;
+}
+
+export function createFakeVideoIndex(seed: VideoRecord[] = []): FakeVideoIndex {
+  const rows: VideoRecord[] = [...seed];
+  let nextId = seed.length + 1;
+
+  const index: FakeVideoIndex = {
+    rows,
+    failNextCreate: false,
+
+    async create(row) {
+      if (index.failNextCreate) {
+        index.failNextCreate = false;
+        throw new Error("simulated index write failure");
+      }
+      const record: VideoRecord = {
+        id: `vid_${nextId++}`,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        ...row,
+      };
+      rows.push(record);
+      return record;
+    },
+
+    async findOwned(userId, id) {
+      return rows.find((row) => row.id === id && row.userId === userId) ?? null;
+    },
+
+    async deleteOwned(userId, id) {
+      const at = rows.findIndex((row) => row.id === id && row.userId === userId);
+      if (at === -1) return 0;
+      rows.splice(at, 1);
+      return 1;
+    },
+  };
+
+  return index;
+}
+
+export function videoRecord(
+  overrides: Partial<VideoRecord> & Pick<VideoRecord, "id" | "userId" | "publicId">
+): VideoRecord {
+  return {
+    title: "A video",
+    description: null,
+    originalSize: "1000",
+    compressedSize: "500",
+    duration: 12,
+    createdAt: new Date("2026-01-01T00:00:00Z"),
+    updatedAt: new Date("2026-01-01T00:00:00Z"),
+    ...overrides,
+  };
+}
+
+export interface FakeCloudinary extends CloudinaryClient {
+  uploads: Array<{ bytes: number; folder: string }>;
+  destroyed: string[];
+  /** Rejected by the next uploadVideo call, then cleared. */
+  uploadError: unknown;
+  /** Rejected by the next destroyVideo call, then cleared. */
+  destroyError: unknown;
+  /** What destroyVideo answers when it does not reject. */
+  destroyResult: CloudinaryDestroyResult;
+  nextResult: CloudinaryUploadResult;
+}
+
+export function createFakeCloudinary(
+  nextResult: CloudinaryUploadResult = { public_id: "video-uploads/abc", bytes: 500, duration: 12 }
+): FakeCloudinary {
+  const fake: FakeCloudinary = {
+    uploads: [],
+    destroyed: [],
+    uploadError: null,
+    destroyError: null,
+    destroyResult: { result: "ok" },
+    nextResult,
+
+    async uploadVideo(buffer, options) {
+      if (fake.uploadError) {
+        const error = fake.uploadError;
+        fake.uploadError = null;
+        throw error;
+      }
+      fake.uploads.push({ bytes: buffer.length, folder: options.folder });
+      return fake.nextResult;
+    },
+
+    async destroyVideo(publicId) {
+      if (fake.destroyError) {
+        const error = fake.destroyError;
+        fake.destroyError = null;
+        throw error;
+      }
+      fake.destroyed.push(publicId);
+      return fake.destroyResult;
+    },
+  };
+
+  return fake;
 }
 
 /** A limiter with a high ceiling, so a test never trips it by accident. */
