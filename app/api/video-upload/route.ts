@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { v2 as cloudinary } from "cloudinary";
 import { auth } from "@clerk/nextjs/server";
 import { prisma } from "@/lib/prisma";
+import { tooManyRequests, uploadRateLimiter } from "@/lib/rateLimiters";
+import { VIDEO_UPLOAD_RULES, validateUpload } from "@/lib/uploadValidation";
 
 // cloud_name is safe in the browser bundle (it is part of every delivery URL);
 // the key and secret are server-only and must never gain a NEXT_PUBLIC_ prefix.
@@ -39,16 +41,27 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const limit = uploadRateLimiter.check(userId);
+    if (!limit.allowed) {
+      return tooManyRequests(limit.retryAfterSeconds);
+    }
+
     const formData = await request.formData();
     const file = (formData.get("file") as File) || null;
     const title = formData.get("title") as string;
     const description = formData.get("description") as string;
 
-    if (!file) {
-      return NextResponse.json({ error: "No file found" }, { status: 400 });
+    // The page checks the size too, but a client-side check is a courtesy, not
+    // a control: the endpoint is reachable with curl.
+    const validation = validateUpload(file, VIDEO_UPLOAD_RULES);
+    if (!validation.ok) {
+      return NextResponse.json(
+        { error: validation.error },
+        { status: validation.status }
+      );
     }
 
-    const bytes = await file.arrayBuffer();
+    const bytes = await file!.arrayBuffer();
     const buffer = Buffer.from(bytes);
 
     const result = await new Promise<CloudinaryUploadResult>(
@@ -70,6 +83,7 @@ export async function POST(request: NextRequest) {
 
     const video = await prisma.video.create({
       data: {
+        userId,
         title,
         description,
         publicId: result.public_id,
